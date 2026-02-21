@@ -1,34 +1,30 @@
-# mJig 🐭
+# mJig 🐀
 
-A stealthy, robust, schedulable PowerShell mouse jiggler with advanced features for keeping your system active.
-
-## Overview
-
-mJig is an intelligent mouse jiggling tool that prevents your computer from going idle by:
-- Moving the mouse cursor randomly at configurable intervals
-- Sending keyboard input (Right Alt key) for applications that monitor keyboard activity
-- Detecting user input and pausing automated movements when you're actively using your computer
-- Running on a schedule with automatic stop times
+A feature-rich PowerShell mouse jiggler with a console-based TUI, designed to keep your system active with natural-looking mouse movements and intelligent user input detection.
 
 ## Features
 
-- **Smart Input Detection**: Automatically pauses when you move the mouse or type, resuming when idle
-- **Schedulable**: Set a specific end time or use the default with random variance
-- **Multiple Output Modes**: Full, minimal, or hidden interface
-- **Interactive Controls**: Hotkeys to toggle settings without stopping the script
-- **Randomized Timing**: Variable intervals to appear more natural
-- **Runtime Tracking**: Displays how long the script has been running
-- **Window Resize Handling**: Automatically adjusts to console window size changes
+- **Smart Mouse Movement**: Randomized cursor movements with configurable distance, speed, and variance
+- **User Input Detection**: Automatically pauses when you're actively using mouse/keyboard
+- **Auto-Resume Delay**: Configurable cooldown timer after user input before resuming automation
+- **Scheduled Stop Time**: Set a specific end time with optional variance for natural patterns
+- **Multiple View Modes**: Full, minimal, or hidden interface
+- **Interactive Dialogs**: Modify settings on-the-fly without restarting
+- **Mouse Stutter Prevention**: Waits for mouse to settle before starting next movement cycle
+- **Window Resize Handling**: Beautiful centered logo with playful quotes during resize
+- **Themeable UI**: Centralized color variables for easy customization
+- **Stats Box**: Real-time display of detected inputs and movement statistics
+- **Click Support**: Mouse-clickable menu buttons and dialog interactions
 
 ## Requirements
 
 - Windows PowerShell 5.1 or PowerShell 7+
-- .NET Framework (for Windows Forms)
+- Windows OS (uses Win32 API for mouse/keyboard interaction)
 
 ## Installation
 
-1. Download the `start-mjig.ps1` script
-2. Ensure PowerShell execution policy allows script execution:
+1. Download `start-mjig.ps1`
+2. Ensure PowerShell execution policy allows scripts:
    ```powershell
    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
    ```
@@ -37,179 +33,116 @@ mJig is an intelligent mouse jiggling tool that prevents your computer from goin
 
 ### Basic Usage
 
-Run the script with default settings:
 ```powershell
+# Run with defaults (no end time, minimal view)
 .\start-mjig.ps1
-```
+Start-mJig
 
-This will:
-- Use the default end time (6:07 PM with ±15 minute variance)
-- Display full output mode
-- Run until the scheduled end time
+# Run with full interface
+Start-mJig -Output full
+
+# Run until 5:30 PM
+Start-mJig -EndTime 1730
+
+# Run hidden in background
+Start-mJig -Output hidden
+```
 
 ### Parameters
 
-#### `-endTime` (Optional)
-Specify when the script should stop in 4-digit 24-hour format.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-Output` | string | `"min"` | View mode: `full`, `min`, or `hidden` |
+| `-EndTime` | string | `"0"` | Stop time in 24hr format (e.g., `1730` for 5:30 PM). `0` = no end time |
+| `-EndVariance` | int | `0` | Random variance in minutes for end time |
+| `-IntervalSeconds` | double | `2` | Base interval between movement cycles |
+| `-IntervalVariance` | double | `2` | Random variance for interval timing |
+| `-MoveSpeed` | double | `0.5` | Movement animation duration in seconds |
+| `-MoveVariance` | double | `0.2` | Random variance for movement speed |
+| `-TravelDistance` | double | `100` | Base cursor travel distance in pixels |
+| `-TravelVariance` | double | `5` | Random variance for travel distance |
+| `-AutoResumeDelaySeconds` | double | `0` | Cooldown after user input before resuming |
+| `-DebugMode` | switch | `$false` | Enable debug logging |
+| `-Diag` | switch | `$false` | Enable diagnostic file output |
 
-**Examples:**
-```powershell
-# Stop at 5:30 PM
-.\start-mjig.ps1 -endTime 1730
+### Interactive Controls
 
-# Stop at 9:15 AM
-.\start-mjig.ps1 -endTime 0915
-
-# Stop at midnight
-.\start-mjig.ps1 -endTime 0000
-```
-
-**Note:** If you don't specify `-endTime` or use `2400`, the script uses a default end time of 1807 (6:07 PM) with a random variance of ±15 minutes to avoid predictable patterns.
-
-#### `-Output` (Optional)
-Control the display mode of the interface.
-
-**Options:**
-- `full` (default): Shows full interface with detailed log entries
-- `min`: Minimal interface with header and controls only (no log entries)
-- `hidden`: Completely hidden interface (runs silently)
-
-**Examples:**
-```powershell
-# Full output (default)
-.\start-mjig.ps1 -Output full
-
-# Minimal output
-.\start-mjig.ps1 -Output min
-
-# Hidden mode
-.\start-mjig.ps1 -Output hidden
-```
-
-### Combined Examples
-
-```powershell
-# Run until 5:00 PM with minimal output
-.\start-mjig.ps1 -endTime 1700 -Output min
-
-# Run until 11:30 PM in hidden mode
-.\start-mjig.ps1 -endTime 2330 -Output hidden
-
-# Run with default end time and full output
-.\start-mjig.ps1 -endTime 2400 -Output full
-```
-
-## Interactive Controls
-
-While the script is running, you can use these hotkeys:
+While running, use these keyboard shortcuts:
 
 | Key | Action |
 |-----|--------|
-| `q` | Quit the script (shows runtime statistics) |
-| `t` | Toggle between full and minimal output modes |
-| `h` | Toggle between visible and hidden output modes |
+| `q` | Open quit confirmation dialog |
+| `t` | Set/change end time |
+| `v` | Toggle between full/min view |
+| `h` | Toggle hidden mode |
+| `m` | Open movement settings dialog (full view only) |
 
-**Note:** These hotkeys work in all output modes, including hidden mode.
+You can also click menu buttons with your mouse.
 
-## How It Works
+### Dialogs
 
-### Movement Pattern
-- Base interval: 10 seconds between movements
-- Variance: ±2 seconds (randomized to appear natural)
-- Movement range: Random movement up to 300 pixels in any direction from current position
-- Keyboard input: Sends Right Alt key press (modifier key that won't interfere with applications)
+**Modify Movement Settings** (`m` key in full view):
+- Interval timing and variance
+- Travel distance and variance  
+- Movement speed and variance
+- Auto-resume delay timer
 
-### Smart Detection
-The script monitors for:
-- **Keyboard input**: Detects any key presses system-wide
-- **Mouse movement**: Detects when you manually move the mouse
-- **User activity**: When detected, skips the automated movement to avoid interfering with your work
+**Set End Time** (`t` key):
+- Enter time in HHmm format (e.g., 1730 for 5:30 PM)
 
-### Scheduling
-- If the specified end time has already passed today, the script schedules for tomorrow
-- Default end time includes random variance (±15 minutes) to avoid predictable patterns
-- Script automatically stops when the end time is reached
+**Quit Confirmation** (`q` key):
+- Displays runtime statistics before exiting
+
+## View Modes
+
+### Full Mode
+- Header with logo, current/end times, view indicator
+- Activity log with timestamped entries
+- Stats box showing detected inputs
+- Interactive menu bar with icons
+
+### Minimal Mode
+- Header with essential info
+- Menu bar only (no log or stats)
+
+### Hidden Mode
+- No visible output
+- Hotkeys still functional
+- Perfect for background operation
 
 ## Configuration
 
-You can modify these settings in the script's configuration section (lines 62-66):
+Movement and timing can be adjusted via:
+1. Command-line parameters at startup
+2. The "Modify Movement" dialog during runtime (`m` key)
 
-```powershell
-$defualtEndTime = 1807              # Default end time (4-digit 24-hour format)
-$defualtEndMaxVariance = 15          # Variance in minutes for default end time
-$intervalSeconds = 10               # Base interval between movements (seconds)
-$intervalVariance = 2               # Maximum variance in seconds for intervals
-```
+### Theme Customization
 
-## Output Modes Explained
+Colors are defined as `$script:` variables in the Theme Colors section (around line 214). Groups include:
+- Menu bar colors
+- Header colors
+- Stats box colors
+- Dialog colors (Quit, Time, Movement)
+- Resize screen colors
+- General UI colors
 
-### Full Mode (`-Output full`)
-- Displays header with end time and current time
-- Shows detailed log entries with:
-  - Timestamp
-  - Movement status
-  - Coordinates
-  - Wait intervals
-  - User input detection
-- Interactive menu at the bottom
-- Best for monitoring and debugging
+## How It Works
 
-### Minimal Mode (`-Output min`)
-- Displays header with end time and current time
-- Shows interactive menu
-- No log entries (cleaner interface)
-- Good for when you want to see status but not detailed logs
+1. **Movement Cycle**: At each interval, the script:
+   - Checks if user is actively moving the mouse
+   - Waits for mouse to "settle" (stop moving) if needed
+   - Moves cursor a random distance in a random direction
+   - Sends a simulated Right Alt keypress (non-intrusive)
 
-### Hidden Mode (`-Output hidden`)
-- No visible output
-- Runs completely silently
-- All hotkeys still work
-- Perfect for background operation
+2. **Input Detection**: Monitors keyboard and mouse activity system-wide using Win32 `GetAsyncKeyState`
 
-## Log Entry Format
+3. **Stutter Prevention**: Before each movement cycle, verifies the mouse has been stationary for a brief period to avoid interfering with user actions
 
-When in full mode, log entries show:
-```
-[Timestamp] - [Status] [Coordinates] [Debug Info]
-```
+## Diagnostics
 
-**Examples:**
-```
-01/20/2025 14:30:15 - Coordinates updated x1234/y567 [Wait: 11s]
-01/20/2025 14:30:26 - Input detected, skipping update [Wait: 9s] [KB:YES]
-```
-
-## Tips
-
-1. **For Work**: Use hidden mode to run silently in the background
-2. **For Testing**: Use full mode to see detailed activity logs
-3. **For Monitoring**: Use minimal mode for a clean status display
-4. **Scheduling**: Set end times slightly before you actually need to stop (the script will continue until that time)
-5. **Natural Behavior**: The randomized intervals and variance make the activity appear more human-like
-
-## Troubleshooting
-
-### Script won't run
-- Check PowerShell execution policy: `Get-ExecutionPolicy`
-- If restricted, run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
-
-### Mouse movements too frequent/infrequent
-- Adjust `$intervalSeconds` and `$intervalVariance` in the configuration section
-
-### Script stops too early/late
-- Check your `-endTime` parameter format (must be 4 digits, 24-hour format)
-- Verify the time hasn't already passed today (it will schedule for tomorrow)
-
-### Keyboard detection issues
-- The script uses Right Alt key which shouldn't interfere with most applications
-- If issues occur, the script will continue with mouse movement only
-
-## Notes
-
-- The script uses Right Alt (VK_RMENU) for keyboard input simulation, which is a modifier key that won't type characters or trigger shortcuts
-- Mouse movements are randomized in both direction and distance (up to 300 pixels)
-- The script automatically handles console window resizing
-- All timing includes randomization to appear more natural and less detectable
+Enable with `-Diag` flag. Creates log files in `$env:TEMP\mjig_diag\`:
+- `startup.txt` - Initialization diagnostics
+- `settle.txt` - Mouse settle detection logs
 
 ## License
 

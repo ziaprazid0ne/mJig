@@ -119,28 +119,20 @@ function Start-mJig {
 	`OOo.
 	`"OOOOOOOOOOOOoooooooo#>
 
-    ###################
-	## Ideas & Notes ##
-	###################
-
-	# Need More inconography in output.
-	# Propper hidden option
-	# stealth toggle for hiding ui (to be seperate from hidden option).
-	# Add a routine to determine the direction the cursor moved and add a corosponding arrow emoji to the log. https://unicode.org/emoji/charts/full-emoji-list.html
-	# Add indecator for current output mode in top bar
-
 	param(
 		[Parameter(Mandatory = $false)] 
 		[ValidateSet("min", "full", "hidden", "dib")]
 		[string]$Output = "min",
 		[Parameter(Mandatory = $false)]
 		[switch]$DebugMode,
+		[Parameter(Mandatory = $false)]
+		[switch]$Diag,
 		[Parameter(Mandatory = $false)] 
 		[string]$EndTime = "0",  # 0 = no end time, otherwise 4-digit 24 hour format (e.g., 1807 = 6:07 PM)
 		[Parameter(Mandatory = $false)]
 		[int]$EndVariance = 0,  # Variance in minutes to randomly add/subtract from EndTime to avoid overly consistent end times. Only applies if EndTime is specified (not 0).
 		[Parameter(Mandatory = $false)]
-		[double]$IntervalSeconds = 10,  # sets the base interval time between refreshes
+		[double]$IntervalSeconds = 2,  # sets the base interval time between refreshes
 		[Parameter(Mandatory = $false)]
 		[double]$IntervalVariance = 2,  # Sets the maximum random plus and minus variance in seconds each refresh
 		[Parameter(Mandatory = $false)]
@@ -148,7 +140,7 @@ function Start-mJig {
 		[Parameter(Mandatory = $false)]
 		[double]$MoveVariance = 0.2,  # Maximum random variance in movement speed (in seconds)
 		[Parameter(Mandatory = $false)]
-		[double]$TravelDistance = 10,  # Base travel distance in pixels
+		[double]$TravelDistance = 100,  # Base travel distance in pixels
 		[Parameter(Mandatory = $false)]
 		[double]$TravelVariance = 5,  # Maximum random variance in travel distance (in pixels)
 		[Parameter(Mandatory = $false)]
@@ -175,11 +167,9 @@ function Start-mJig {
 	$OldBufferSize = $null
 	$OldWindowSize = $null
 	$Rows = 0
-	$OldRows = 0
 	$SkipUpdate = $false
 	$PreviousView = $null  # Store the view before hiding to restore it later
 	$PosUpdate = $false
-	$Time = $false
 	$LogArray = @()
 	$HostWidth = 0
 	$HostHeight = 0
@@ -194,91 +184,109 @@ function Start-mJig {
 	$PreviousMouseWheelDelta = 0  # Track mouse wheel position for scroll detection
 	$LastResizeDetection = $null  # Track when we last detected a resize
 	$PendingResize = $null  # Track pending resize to throttle redraws
-	$ResizeThrottleMs = 200  # Wait 200ms after window stops resizing before processing resize
+	$ResizeThrottleMs = 1500  # Wait 2000ms after window stops resizing before processing resize
+	$ResizeClearedScreen = $false  # Track if we've cleared the screen at the start of a resize
+	$LastResizeLogoTime = $null  # Track when we last drew the resize logo
+	$script:LoopIteration = 0  # Track loop iterations for diagnostics
 	$script:lastInputCheckTime = $null  # Track when we last logged input check (for debug mode)
 	$script:DialogButtonClick = $null  # Track dialog button clicks detected from main loop ("Update" or "Cancel")
+	
+	# Performance: Cache for reflection method lookups
+	$script:MethodCache = @{}
+	
+	# Note: Screen bounds are cached later after System.Windows.Forms is loaded
+	$script:ScreenWidth = $null
+	$script:ScreenHeight = $null
 	$script:DialogButtonBounds = $null  # Store dialog button bounds when dialog is open {buttonRowY, updateStartX, updateEndX, cancelStartX, cancelEndX}
 	$script:LastClickLogTime = $null  # Track when we last logged a click to prevent duplicate logs
 	$script:WindowTitle = "mJig - mJigg"  # Fixed window title (same for all instances to enable duplicate detection)
 	
-	# Function to find window handle by title (for duplicate detection)
-	function Find-WindowHandleByTitle {
-		param(
-			[string]$WindowTitle
-		)
-		
-		$foundHandles = @()
-		
-		# Use EnumWindows to find all windows with matching title
-		try {
-			$hasEnumWindows = [mJiggAPI.Mouse].GetMethod("EnumWindows") -ne $null
-			$hasGetWindowText = [mJiggAPI.Mouse].GetMethod("GetWindowText") -ne $null
-			$hasGetWindowThreadProcessId = [mJiggAPI.Mouse].GetMethod("GetWindowThreadProcessId") -ne $null
-			
-			if ($hasEnumWindows -and $hasGetWindowText -and $hasGetWindowThreadProcessId) {
-				# We need to use a C# callback, so we'll create a temporary class for this
-				# For now, use FindWindow which finds the first match
-				$hasFindWindow = [mJiggAPI.Mouse].GetMethod("FindWindow") -ne $null
-				if ($hasFindWindow) {
-					$handle = [mJiggAPI.Mouse]::FindWindow($null, $WindowTitle)
-					if ($handle -ne [IntPtr]::Zero) {
-						$foundHandles += $handle
-					}
-				}
-			}
-		} catch {
-			# EnumWindows/FindWindow failed
-		}
-		
-		return $foundHandles
-	}
+	# Box-drawing characters (using Unicode code points to avoid encoding issues)
+	$script:BoxTopLeft = [char]0x250C      # ┌
+	$script:BoxTopRight = [char]0x2510     # ┐
+	$script:BoxBottomLeft = [char]0x2514   # └
+	$script:BoxBottomRight = [char]0x2518  # ┘
+	$script:BoxHorizontal = [char]0x2500   # ─
+	$script:BoxVertical = [char]0x2502     # │
+	$script:BoxVerticalRight = [char]0x251C # ├
+	$script:BoxVerticalLeft = [char]0x2524  # ┤
 	
-	# Function to check if another instance with the same title is running
-	function Test-DuplicateWindow {
-		param(
-			[string]$WindowTitle
-		)
-		
-		try {
-			$handles = Find-WindowHandleByTitle -WindowTitle $WindowTitle
-			if ($handles.Count -gt 0) {
-				# Check if any of these windows belong to a different process
-				$hasGetWindowThreadProcessId = [mJiggAPI.Mouse].GetMethod("GetWindowThreadProcessId") -ne $null
-				if ($hasGetWindowThreadProcessId) {
-					foreach ($handle in $handles) {
-						$windowProcessId = 0
-						[mJiggAPI.Mouse]::GetWindowThreadProcessId($handle, [ref]$windowProcessId) | Out-Null
-						if ($windowProcessId -ne 0 -and $windowProcessId -ne $PID) {
-							# Found a window with same title but different process
-							try {
-								$otherProcess = Get-Process -Id $windowProcessId -ErrorAction SilentlyContinue
-								if ($null -ne $otherProcess) {
-									return @{
-										IsDuplicate = $true
-										ProcessId = $windowProcessId
-										ProcessName = $otherProcess.ProcessName
-										WindowHandle = $handle
-									}
-								}
-							} catch {
-								# Process lookup failed, but we know it's a different PID
-								return @{
-									IsDuplicate = $true
-									ProcessId = $windowProcessId
-									ProcessName = "Unknown"
-									WindowHandle = $handle
-								}
-							}
-						}
-					}
-				}
-			}
-		} catch {
-			# Check failed
-		}
-		
-		return @{ IsDuplicate = $false }
-	}
+	# ============================================================================
+	# Theme Colors - Centralized color definitions for easy customization
+	# ============================================================================
+	
+	# Menu Bar (bottom of main screen)
+	$script:MenuButtonBg = "DarkBlue"
+	$script:MenuButtonText = "White"
+	$script:MenuButtonHotkey = "Green"
+	$script:MenuButtonPipe = "White"
+	
+	# Main Display - Header
+	$script:HeaderAppName = "Magenta"
+	$script:HeaderIcon = "White"
+	$script:HeaderStatus = "Green"
+	$script:HeaderPaused = "Yellow"
+	$script:HeaderTimeLabel = "Yellow"
+	$script:HeaderTimeValue = "Green"
+	$script:HeaderViewTag = "Magenta"
+	$script:HeaderSeparator = "White"
+	
+	# Main Display - Stats Box
+	$script:StatsBoxBorder = "Cyan"
+	$script:StatsBoxTitle = "Cyan"
+	$script:StatsLabel = "White"
+	$script:StatsValue = "Yellow"
+	$script:StatsValueGood = "Green"
+	$script:StatsValueBad = "Red"
+	
+	# Quit Dialog
+	$script:QuitDialogBg = "DarkMagenta"
+	$script:QuitDialogShadow = "DarkMagenta"
+	$script:QuitDialogBorder = "White"
+	$script:QuitDialogTitle = "Yellow"
+	$script:QuitDialogText = "White"
+	$script:QuitDialogButtonBg = "Magenta"
+	$script:QuitDialogButtonText = "White"
+	$script:QuitDialogButtonHotkey = "Yellow"
+	
+	# Set Time Dialog
+	$script:TimeDialogBg = "DarkBlue"
+	$script:TimeDialogShadow = "DarkBlue"
+	$script:TimeDialogBorder = "White"
+	$script:TimeDialogTitle = "Yellow"
+	$script:TimeDialogText = "White"
+	$script:TimeDialogButtonBg = "Blue"
+	$script:TimeDialogButtonText = "White"
+	$script:TimeDialogButtonHotkey = "Yellow"
+	$script:TimeDialogFieldBg = "Blue"
+	$script:TimeDialogFieldText = "White"
+	
+	# Modify Movement Dialog
+	$script:MoveDialogBg = "DarkBlue"
+	$script:MoveDialogShadow = "DarkBlue"
+	$script:MoveDialogBorder = "White"
+	$script:MoveDialogTitle = "Yellow"
+	$script:MoveDialogSectionTitle = "Yellow"
+	$script:MoveDialogText = "White"
+	$script:MoveDialogButtonBg = "Blue"
+	$script:MoveDialogButtonText = "White"
+	$script:MoveDialogButtonHotkey = "Yellow"
+	$script:MoveDialogFieldBg = "Blue"
+	$script:MoveDialogFieldText = "White"
+	
+	# Resize Screen
+	$script:ResizeBoxBorder = "White"
+	$script:ResizeLogoName = "Magenta"
+	$script:ResizeLogoIcon = "White"
+	$script:ResizeQuoteText = "DarkGray"
+	
+	# General UI
+	$script:TextDefault = "White"
+	$script:TextMuted = "DarkGray"
+	$script:TextHighlight = "Cyan"
+	$script:TextSuccess = "Green"
+	$script:TextWarning = "Yellow"
+	$script:TextError = "Red"
 	
 	# Function to find window handle using EnumWindows (like Get-ProcessWindow.ps1)
 	function Find-WindowHandle {
@@ -355,17 +363,17 @@ function Start-mJig {
 	try {
 		$Host.UI.RawUI.WindowTitle = if ($DebugMode) { "$script:WindowTitle - DEBUGMODE" } else { $script:WindowTitle }
 		if ($DebugMode) {
-			Write-Host "[DEBUG] Set window title: $($Host.UI.RawUI.WindowTitle)" -ForegroundColor Cyan
+			Write-Host "[DEBUG] Set window title: $($Host.UI.RawUI.WindowTitle)" -ForegroundColor $script:TextHighlight
 		}
 	} catch {
 		if ($DebugMode) {
-			Write-Host "  [WARN] Failed to set window title: $($_.Exception.Message)" -ForegroundColor Yellow
+			Write-Host "  [WARN] Failed to set window title: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
 		}
 	}
 	
 	# Check for duplicate windows - FAIL if another instance is running
 	if ($DebugMode) {
-		Write-Host "[DEBUG] Checking for duplicate mJig instances..." -ForegroundColor Cyan
+		Write-Host "[DEBUG] Checking for duplicate mJig instances..." -ForegroundColor $script:TextHighlight
 	}
 	
 	$duplicateFound = $false
@@ -444,24 +452,24 @@ function Start-mJig {
 		}
 	} catch {
 		if ($DebugMode) {
-			Write-Host "  [WARN] Could not check for duplicates: $($_.Exception.Message)" -ForegroundColor Yellow
+			Write-Host "  [WARN] Could not check for duplicates: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
 		}
 	}
 	
 	# If duplicate found, exit with error
 	if ($duplicateFound) {
 		Write-Host ""
-		Write-Host "ERROR: Another instance of mJig is already running!" -ForegroundColor Red
-		Write-Host "  Process ID: $duplicateProcessId" -ForegroundColor Red
-		Write-Host "  Process Name: $duplicateProcessName" -ForegroundColor Red
-		Write-Host "  Window Title: $script:WindowTitle" -ForegroundColor Red
+		Write-Host "ERROR: Another instance of mJig is already running!" -ForegroundColor $script:TextError
+		Write-Host "  Process ID: $duplicateProcessId" -ForegroundColor $script:TextError
+		Write-Host "  Process Name: $duplicateProcessName" -ForegroundColor $script:TextError
+		Write-Host "  Window Title: $script:WindowTitle" -ForegroundColor $script:TextError
 		Write-Host ""
-		Write-Host "Please close the other instance before starting a new one." -ForegroundColor Yellow
+		Write-Host "Please close the other instance before starting a new one." -ForegroundColor $script:TextWarning
 		Write-Host ""
 		exit 1
 	} else {
 		if ($DebugMode) {
-			Write-Host "  [OK] No duplicate instances found" -ForegroundColor Green
+			Write-Host "  [OK] No duplicate instances found" -ForegroundColor $script:TextSuccess
 		}
 	}
 	
@@ -475,12 +483,12 @@ function Start-mJig {
 	}
 	
 	if ($DebugMode) {
-		Write-Host "Initialization Debug" -ForegroundColor Magenta
+		Write-Host "Initialization Debug" -ForegroundColor $script:HeaderAppName
 		Write-Host ""
-		Write-Host "[DEBUG] Initializing console..." -ForegroundColor Cyan
+		Write-Host "[DEBUG] Initializing console..." -ForegroundColor $script:TextHighlight
 		# Window title already set above, just log it
-		Write-Host "[DEBUG] Window title: $($Host.UI.RawUI.WindowTitle)" -ForegroundColor Cyan
-		Write-Host "[DEBUG] DebugMode is ENABLED - click detection will be logged" -ForegroundColor Yellow
+		Write-Host "[DEBUG] Window title: $($Host.UI.RawUI.WindowTitle)" -ForegroundColor $script:TextHighlight
+		Write-Host "[DEBUG] DebugMode is ENABLED - click detection will be logged" -ForegroundColor $script:TextWarning
 		Write-Host ""
 	}
 	try {
@@ -505,46 +513,43 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 				$newMode = ($mode -band (-bnot $ENABLE_QUICK_EDIT_MODE)) -bor $ENABLE_MOUSE_INPUT
 				if ($type::SetConsoleMode($hConsole, $newMode)) {
 					if ($DebugMode) {
-						Write-Host "  [OK] Quick Edit Mode disabled, Mouse Input enabled" -ForegroundColor Green
+						Write-Host "  [OK] Quick Edit Mode disabled, Mouse Input enabled" -ForegroundColor $script:TextSuccess
 					}
 				} else {
 					if ($DebugMode) {
-						Write-Host "  [WARN] Failed to set console mode (SetConsoleMode failed)" -ForegroundColor Yellow
+						Write-Host "  [WARN] Failed to set console mode (SetConsoleMode failed)" -ForegroundColor $script:TextWarning
 					}
 				}
 			} else {
 				if ($DebugMode) {
-					Write-Host "  [WARN] Failed to disable Quick Edit Mode (GetConsoleMode failed)" -ForegroundColor Yellow
+					Write-Host "  [WARN] Failed to disable Quick Edit Mode (GetConsoleMode failed)" -ForegroundColor $script:TextWarning
 				}
 			}
 		} else {
 			if ($DebugMode) {
-				Write-Host "  [WARN] Failed to disable Quick Edit Mode (could not load Win32 API)" -ForegroundColor Yellow
+				Write-Host "  [WARN] Failed to disable Quick Edit Mode (could not load Win32 API)" -ForegroundColor $script:TextWarning
 			}
 		}
 	} catch {
 		if ($DebugMode) {
-			Write-Host "  [WARN] Failed to disable Quick Edit Mode: $($_.Exception.Message)" -ForegroundColor Yellow
+			Write-Host "  [WARN] Failed to disable Quick Edit Mode: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
 		}
 	}
 	
 	try {
 		[Console]::CursorVisible = $false
 		if ($DebugMode) {
-			Write-Host "  [OK] Console cursor hidden" -ForegroundColor Green
+			Write-Host "  [OK] Console cursor hidden" -ForegroundColor $script:TextSuccess
 		}
 	} catch {
 		if ($DebugMode) {
-			Write-Host "  [FAIL] Failed to hide cursor: $($_.Exception.Message)" -ForegroundColor Red
+			Write-Host "  [FAIL] Failed to hide cursor: $($_.Exception.Message)" -ForegroundColor $script:TextError
 		}
-	}
-	if ($Output -ne "hidden") {
-		# Console already cleared above, no need to clear again
 	}
 	
 	# Capture Initial Buffer & Window Sizes (needed even for hidden mode)
 	if ($DebugMode) {
-		Write-Host "[DEBUG] Capturing console dimensions..." -ForegroundColor Cyan
+		Write-Host "[DEBUG] Capturing console dimensions..." -ForegroundColor $script:TextHighlight
 	}
 	try {
 		$pshost = Get-Host
@@ -552,13 +557,13 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 		$newWindowSize = $pswindow.WindowSize
 		$newBufferSize = $pswindow.BufferSize
 		if ($DebugMode) {
-			Write-Host "  [OK] Got console dimensions" -ForegroundColor Green
+			Write-Host "  [OK] Got console dimensions" -ForegroundColor $script:TextSuccess
 			Write-Host "    Window Size: $($newWindowSize.Width)x$($newWindowSize.Height)" -ForegroundColor Gray
 			Write-Host "    Buffer Size: $($newBufferSize.Width)x$($newBufferSize.Height)" -ForegroundColor Gray
 		}
 	} catch {
 		if ($DebugMode) {
-			Write-Host "  [FAIL] Failed to get console dimensions: $($_.Exception.Message)" -ForegroundColor Red
+			Write-Host "  [FAIL] Failed to get console dimensions: $($_.Exception.Message)" -ForegroundColor $script:TextError
 		}
 		throw  # Re-throw as this is critical
 	}
@@ -567,12 +572,12 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 		$pswindow.BufferSize = New-Object System.Management.Automation.Host.Size($newBufferSize.Width, $newWindowSize.Height)
 		$newBufferSize = $pswindow.BufferSize
 		if ($DebugMode) {
-			Write-Host "  [OK] Set buffer height to match window height" -ForegroundColor Green
+			Write-Host "  [OK] Set buffer height to match window height" -ForegroundColor $script:TextSuccess
 		}
 	} catch {
 		# If setting buffer size fails, continue with current buffer size
 		if ($DebugMode) {
-			Write-Host "  [WARN] Failed to set buffer size: $($_.Exception.Message)" -ForegroundColor Yellow
+			Write-Host "  [WARN] Failed to set buffer size: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
 			Write-Host "    Continuing with current buffer size" -ForegroundColor Gray
 		}
 		$newBufferSize = $pswindow.BufferSize
@@ -587,22 +592,22 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 
 	# Initialize the Output Array
 	if ($DebugMode) {
-		Write-Host "[DEBUG] Initializing output array..." -ForegroundColor Cyan
+		Write-Host "[DEBUG] Initializing output array..." -ForegroundColor $script:TextHighlight
 	}
 	try {
 		if ($Output -ne "hidden") {
 			$LogArray = @()
 			if ($DebugMode) {
-				Write-Host "  [OK] Output mode: $Output" -ForegroundColor Green
+				Write-Host "  [OK] Output mode: $Output" -ForegroundColor $script:TextSuccess
 			}
 		} else {
 			if ($DebugMode) {
-				Write-Host "  [OK] Output mode: hidden (no log array)" -ForegroundColor Green
+				Write-Host "  [OK] Output mode: hidden (no log array)" -ForegroundColor $script:TextSuccess
 			}
 		}
 	} catch {
 		if ($DebugMode) {
-			Write-Host "  [FAIL] Failed to initialize output array: $($_.Exception.Message)" -ForegroundColor Red
+			Write-Host "  [FAIL] Failed to initialize output array: $($_.Exception.Message)" -ForegroundColor $script:TextError
 		}
 		throw  # Re-throw as this is critical
 	}
@@ -612,7 +617,7 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 	###############################
 	
 	if ($DebugMode) {
-		Write-Host "[DEBUG] Calculating end times..." -ForegroundColor Cyan
+		Write-Host "[DEBUG] Calculating end times..." -ForegroundColor $script:TextHighlight
 	}
 	
 	# Convert EndTime to string and parse
@@ -625,7 +630,7 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 			$endTimeInt = -1
 			$endTimeStr = ""
 			if ($DebugMode) {
-				Write-Host "  [OK] No end time specified - script will run indefinitely" -ForegroundColor Green
+				Write-Host "  [OK] No end time specified - script will run indefinitely" -ForegroundColor $script:TextSuccess
 			}
 		} elseif ($endTimeTrimmed.Length -eq 2) {
 			# 2-digit input = hour on the hour (e.g., "12" = 1200, "00" = 0000)
@@ -634,10 +639,10 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 				$endTimeInt = $hours * 100  # Convert to HHmm format (e.g., 12 -> 1200)
 				$endTimeStr = $endTimeInt.ToString().PadLeft(4, '0')
 				if ($DebugMode) {
-					Write-Host "  [OK] Parsed end time: $endTimeStr (hour on the hour)" -ForegroundColor Green
+					Write-Host "  [OK] Parsed end time: $endTimeStr (hour on the hour)" -ForegroundColor $script:TextSuccess
 				}
 			} else {
-				Write-Host "Error: Invalid hour format. Hours must be 00-23. Got: $EndTime" -ForegroundColor Red
+				Write-Host "Error: Invalid hour format. Hours must be 00-23. Got: $EndTime" -ForegroundColor $script:TextError
 				throw "Invalid hour format: $EndTime"
 			}
 		} elseif ($endTimeTrimmed.Length -eq 4) {
@@ -650,52 +655,73 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 			if ($hours -ge 0 -and $hours -le 23 -and $minutes -ge 0 -and $minutes -le 59) {
 				$endTimeStr = $endTimeTrimmed
 				if ($DebugMode) {
-					Write-Host "  [OK] Parsed end time: $endTimeStr" -ForegroundColor Green
+					Write-Host "  [OK] Parsed end time: $endTimeStr" -ForegroundColor $script:TextSuccess
 				}
 			} else {
 				if ($hours -gt 23) {
-					Write-Host "Error: Invalid time format. Hours must be 00-23. Got: $EndTime" -ForegroundColor Red
+					Write-Host "Error: Invalid time format. Hours must be 00-23. Got: $EndTime" -ForegroundColor $script:TextError
 				} elseif ($minutes -gt 59) {
-					Write-Host "Error: Invalid time format. Minutes must be 00-59. Got: $EndTime" -ForegroundColor Red
+					Write-Host "Error: Invalid time format. Minutes must be 00-59. Got: $EndTime" -ForegroundColor $script:TextError
 				} else {
-					Write-Host "Error: Invalid time format. Expected HHmm format (0000-2359). Got: $EndTime" -ForegroundColor Red
+					Write-Host "Error: Invalid time format. Expected HHmm format (0000-2359). Got: $EndTime" -ForegroundColor $script:TextError
 				}
 				throw "Invalid time format: $EndTime"
 			}
 		} else {
-			Write-Host "Error: Invalid time format. Expected '0' (none), 2-digit hour (00-23), or 4-digit HHmm (0000-2359). Got: $EndTime" -ForegroundColor Red
+			Write-Host "Error: Invalid time format. Expected '0' (none), 2-digit hour (00-23), or 4-digit HHmm (0000-2359). Got: $EndTime" -ForegroundColor $script:TextError
 			throw "Invalid time format: $EndTime"
 		}
 	} catch {
 		if ($DebugMode) {
-			Write-Host "  [FAIL] Failed to parse endTime: $($_.Exception.Message)" -ForegroundColor Red
+			Write-Host "  [FAIL] Failed to parse endTime: $($_.Exception.Message)" -ForegroundColor $script:TextError
 		}
 		if ($_.Exception.Message -notmatch "Invalid time format") {
-			Write-Host "Error: Invalid EndTime format: $EndTime" -ForegroundColor Red
+			Write-Host "Error: Invalid EndTime format: $EndTime" -ForegroundColor $script:TextError
 		}
 		throw
 	}
 	
 	# Time format has already been validated in the try-catch block above
 	# Proceed with initialization
+		# Diagnostics - initialize folder and file paths
+		$script:DiagEnabled = $Diag
+		if ($script:DiagEnabled) {
+			$script:DiagFolder = Join-Path $env:TEMP "mjig_diag"
+			if (-not (Test-Path $script:DiagFolder)) {
+				New-Item -ItemType Directory -Path $script:DiagFolder -Force | Out-Null
+			}
+			$script:StartupDiagFile = Join-Path $script:DiagFolder "startup.txt"
+			$script:SettleDiagFile = Join-Path $script:DiagFolder "settle.txt"
+			
+			"$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 1: Starting initialization" | Out-File $script:StartupDiagFile
+			"  Diag enabled, folder: $script:DiagFolder" | Out-File $script:StartupDiagFile -Append
+			"$(Get-Date -Format 'HH:mm:ss.fff') - Settle diagnostics started" | Out-File $script:SettleDiagFile
+		}
+		
 		if ($DebugMode) {
-			Write-Host "[DEBUG] Loading System.Windows.Forms assembly..." -ForegroundColor Cyan
+			Write-Host "[DEBUG] Loading System.Windows.Forms assembly..." -ForegroundColor $script:TextHighlight
 		}
 		try {
 			Add-Type -AssemblyName System.Windows.Forms
 			if ($DebugMode) {
-				Write-Host "  [OK] System.Windows.Forms loaded" -ForegroundColor Green
+				Write-Host "  [OK] System.Windows.Forms loaded" -ForegroundColor $script:TextSuccess
+			}
+			# Cache screen bounds now that the assembly is loaded
+			$script:ScreenWidth = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
+			$script:ScreenHeight = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height
+			if ($DebugMode) {
+				Write-Host "  [OK] Screen bounds cached: $($script:ScreenWidth) x $($script:ScreenHeight)" -ForegroundColor $script:TextSuccess
 			}
 		} catch {
 			if ($DebugMode) {
-				Write-Host "  [FAIL] Failed to load System.Windows.Forms: $($_.Exception.Message)" -ForegroundColor Red
+				Write-Host "  [FAIL] Failed to load System.Windows.Forms: $($_.Exception.Message)" -ForegroundColor $script:TextError
 			}
 			throw  # Re-throw as this is critical
 		}
 		
 		# Add Windows API for system-wide keyboard detection and key sending
 		if ($DebugMode) {
-			Write-Host "[DEBUG] Loading Windows API types..." -ForegroundColor Cyan
+			Write-Host "[DEBUG] Loading Windows API types..." -ForegroundColor $script:TextHighlight
 		}
 		# Check if types already exist and have the required methods
 		$typesNeedReload = $false
@@ -726,9 +752,9 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 					# User may need to restart PowerShell session to get updated types
 					$typesNeedReload = $true
 					if ($DebugMode) {
-						Write-Host "  [WARN] Existing types found but missing required methods" -ForegroundColor Yellow
-						Write-Host "  [WARN] Missing: GetCursorPos=$(-not $hasGetCursorPos), GetForegroundWindow=$(-not $hasGetForegroundWindow), FindWindow=$(-not $hasFindWindow), FindWindowByProcessId=$(-not $hasFindWindowByProcessId), FindWindowByTitlePattern=$(-not $hasFindWindowByTitlePattern)" -ForegroundColor Yellow
-						Write-Host "  [WARN] Attempting reload (may fail if types already exist - restart PowerShell if needed)" -ForegroundColor Yellow
+						Write-Host "  [WARN] Existing types found but missing required methods" -ForegroundColor $script:TextWarning
+						Write-Host "  [WARN] Missing: GetCursorPos=$(-not $hasGetCursorPos), GetForegroundWindow=$(-not $hasGetForegroundWindow), FindWindow=$(-not $hasFindWindow), FindWindowByProcessId=$(-not $hasFindWindowByProcessId), FindWindowByTitlePattern=$(-not $hasFindWindowByTitlePattern)" -ForegroundColor $script:TextWarning
+						Write-Host "  [WARN] Attempting reload (may fail if types already exist - restart PowerShell if needed)" -ForegroundColor $script:TextWarning
 					}
 				} else {
 					# Types exist and have required methods - skip reload
@@ -1084,11 +1110,11 @@ namespace mJiggAPI {
 				$addTypeError = $null
 				try {
 					if ($DebugMode) {
-						Write-Host "  [DEBUG] Attempting to add types..." -ForegroundColor Cyan
+						Write-Host "  [DEBUG] Attempting to add types..." -ForegroundColor $script:TextHighlight
 					}
 					$addTypeResult = Add-Type -TypeDefinition $typeDefinition -ReferencedAssemblies @("System.dll") -ErrorAction Stop
 					if ($DebugMode) {
-						Write-Host "  [OK] Add-Type completed successfully" -ForegroundColor Green
+						Write-Host "  [OK] Add-Type completed successfully" -ForegroundColor $script:TextSuccess
 					}
 				} catch {
 					$addTypeError = $_
@@ -1096,14 +1122,14 @@ namespace mJiggAPI {
 					# Check if the error is about duplicate types
 					if ($_.Exception.Message -like "*already exists*" -or $_.Exception.Message -like "*duplicate*" -or $_.Exception.Message -like "*Cannot add type*") {
 						if ($DebugMode) {
-							Write-Host "  [INFO] Types may already exist: $($_.Exception.Message)" -ForegroundColor Yellow
+							Write-Host "  [INFO] Types may already exist: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
 						}
 					} else {
 						# Some other error occurred - log it
 						if ($DebugMode) {
-							Write-Host "  [WARN] Add-Type error: $($_.Exception.Message)" -ForegroundColor Yellow
+							Write-Host "  [WARN] Add-Type error: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
 							if ($_.Exception.InnerException) {
-								Write-Host "  [WARN] Inner exception: $($_.Exception.InnerException.Message)" -ForegroundColor Yellow
+								Write-Host "  [WARN] Inner exception: $($_.Exception.InnerException.Message)" -ForegroundColor $script:TextWarning
 							}
 						}
 						# Don't throw yet - we'll check if types exist anyway
@@ -1149,7 +1175,7 @@ namespace mJiggAPI {
 						}
 					} catch {
 						if ($DebugMode) {
-							Write-Host "  [WARN] Error checking for loaded types: $($_.Exception.Message)" -ForegroundColor Yellow
+							Write-Host "  [WARN] Error checking for loaded types: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
 						}
 					}
 				}
@@ -1157,7 +1183,7 @@ namespace mJiggAPI {
 				# Check if we have all three types
 				if ($null -ne $loadedKeyboard -and $null -ne $loadedMouse -and $null -ne $loadedMouseHook) {
 					if ($DebugMode) {
-						Write-Host "  [OK] All types verified: Keyboard, Mouse, MouseHook" -ForegroundColor Green
+						Write-Host "  [OK] All types verified: Keyboard, Mouse, MouseHook" -ForegroundColor $script:TextSuccess
 					}
 				} else {
 					# Types weren't loaded - check if they already exist from previous check
@@ -1168,7 +1194,7 @@ namespace mJiggAPI {
 					} else {
 						# Types don't exist and failed to load - try to find them anywhere
 						if ($DebugMode) {
-							Write-Host "  [DEBUG] Searching all assemblies for mJiggAPI types..." -ForegroundColor Cyan
+							Write-Host "  [DEBUG] Searching all assemblies for mJiggAPI types..." -ForegroundColor $script:TextHighlight
 							try {
 								$allAssemblies = [System.AppDomain]::CurrentDomain.GetAssemblies()
 								foreach ($assembly in $allAssemblies) {
@@ -1182,7 +1208,7 @@ namespace mJiggAPI {
 									}
 								}
 							} catch {
-								Write-Host "    Error searching assemblies: $($_.Exception.Message)" -ForegroundColor Yellow
+								Write-Host "    Error searching assemblies: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
 							}
 						}
 						
@@ -1196,7 +1222,7 @@ namespace mJiggAPI {
 							$errorMsg += "`nAdd-Type error: $($addTypeError.Exception.Message)"
 						}
 						if ($DebugMode) {
-							Write-Host "  [FAIL] $errorMsg" -ForegroundColor Red
+							Write-Host "  [FAIL] $errorMsg" -ForegroundColor $script:TextError
 						}
 						throw $errorMsg
 					}
@@ -1223,8 +1249,8 @@ namespace mJiggAPI {
 					}
 				} else {
 					if ($DebugMode) {
-						Write-Host "  [FAIL] Add-Type failed and types don't exist: $($_.Exception.Message)" -ForegroundColor Red
-						Write-Host "  [INFO] This may require restarting PowerShell to reload types" -ForegroundColor Yellow
+						Write-Host "  [FAIL] Add-Type failed and types don't exist: $($_.Exception.Message)" -ForegroundColor $script:TextError
+						Write-Host "  [INFO] This may require restarting PowerShell to reload types" -ForegroundColor $script:TextWarning
 					}
 					throw "Failed to load required mJiggAPI types: $($_.Exception.Message)"
 				}
@@ -1232,6 +1258,7 @@ namespace mJiggAPI {
 		}
 		
 		# Verify types loaded correctly
+		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 2: Types loaded, verifying" | Out-File $script:StartupDiagFile -Append }
 		try {
 			$testKey = [mJiggAPI.Keyboard]::GetAsyncKeyState(0x01)
 			$testPoint = New-Object mJiggAPI.POINT
@@ -1240,13 +1267,13 @@ namespace mJiggAPI {
 				$testMouse = [mJiggAPI.Mouse]::GetCursorPos([ref]$testPoint)
 			}
 			if ($DebugMode) {
-				Write-Host "  [OK] Windows API types loaded successfully" -ForegroundColor Green
+				Write-Host "  [OK] Windows API types loaded successfully" -ForegroundColor $script:TextSuccess
 			}
 		} catch {
 			if ($DebugMode) {
-				Write-Host "  [FAIL] Could not verify keyboard/mouse API: $($_.Exception.Message)" -ForegroundColor Red
+				Write-Host "  [FAIL] Could not verify keyboard/mouse API: $($_.Exception.Message)" -ForegroundColor $script:TextError
 			}
-			Write-Host "Warning: Could not verify keyboard/mouse API. Some features may be disabled." -ForegroundColor Yellow
+			Write-Host "Warning: Could not verify keyboard/mouse API. Some features may be disabled." -ForegroundColor $script:TextWarning
 		}
 		
 		# Apply variance to end time if variance is set and end time is specified (not -1)
@@ -1268,11 +1295,11 @@ namespace mJiggAPI {
 				}
 				$endTimeStr = $endTimeInt.ToString().PadLeft(4, '0')
 				if ($DebugMode) {
-					Write-Host "  [OK] Applied variance: $variance minutes, final end time: $endTimeStr" -ForegroundColor Green
+					Write-Host "  [OK] Applied variance: $variance minutes, final end time: $endTimeStr" -ForegroundColor $script:TextSuccess
 				}
 			} catch {
 				if ($DebugMode) {
-					Write-Host "  [FAIL] Failed to apply variance: $($_.Exception.Message)" -ForegroundColor Red
+					Write-Host "  [FAIL] Failed to apply variance: $($_.Exception.Message)" -ForegroundColor $script:TextError
 				}
 			}
 		}
@@ -1282,11 +1309,11 @@ namespace mJiggAPI {
 			try {
 				$currentTime = Get-Date -Format "HHmm"
 				if ($DebugMode) {
-					Write-Host "  [OK] Current time: $currentTime" -ForegroundColor Green
+					Write-Host "  [OK] Current time: $currentTime" -ForegroundColor $script:TextSuccess
 				}
 			} catch {
 				if ($DebugMode) {
-					Write-Host "  [FAIL] Failed to get current time: $($_.Exception.Message)" -ForegroundColor Red
+					Write-Host "  [FAIL] Failed to get current time: $($_.Exception.Message)" -ForegroundColor $script:TextError
 				}
 				throw
 			}
@@ -1295,22 +1322,22 @@ namespace mJiggAPI {
 					$tommorow = (Get-Date).AddDays(1)
 					$endDate = Get-Date $tommorow -Format "MMdd"
 					if ($DebugMode) {
-						Write-Host "  [OK] End time is today, using tomorrow's date: $endDate" -ForegroundColor Green
+						Write-Host "  [OK] End time is today, using tomorrow's date: $endDate" -ForegroundColor $script:TextSuccess
 					}
 				} else {
 					$endDate = Get-Date -Format "MMdd"
 					if ($DebugMode) {
-						Write-Host "  [OK] End time is today, using today's date: $endDate" -ForegroundColor Green
+						Write-Host "  [OK] End time is today, using today's date: $endDate" -ForegroundColor $script:TextSuccess
 					}
 				}
 				$end = "$endDate$endTimeStr"
 				$time = $false
 				if ($DebugMode) {
-					Write-Host "  [OK] Final end datetime: $end" -ForegroundColor Green
+					Write-Host "  [OK] Final end datetime: $end" -ForegroundColor $script:TextSuccess
 				}
 			} catch {
 				if ($DebugMode) {
-					Write-Host "  [FAIL] Failed to calculate end datetime: $($_.Exception.Message)" -ForegroundColor Red
+					Write-Host "  [FAIL] Failed to calculate end datetime: $($_.Exception.Message)" -ForegroundColor $script:TextError
 				}
 				throw
 			}
@@ -1319,13 +1346,13 @@ namespace mJiggAPI {
 			$end = ""
 			$time = $false
 			if ($DebugMode) {
-				Write-Host "  [OK] No end time - script will run indefinitely" -ForegroundColor Green
+				Write-Host "  [OK] No end time - script will run indefinitely" -ForegroundColor $script:TextSuccess
 			}
 		}
 
 		# Initialize mouse wheel hook for scroll detection
 		if ($DebugMode) {
-			Write-Host "[DEBUG] Initializing mouse wheel hook..." -ForegroundColor Cyan
+			Write-Host "[DEBUG] Initializing mouse wheel hook..." -ForegroundColor $script:TextHighlight
 		}
 		try {
 			[mJiggAPI.MouseHook]::InstallHook()
@@ -1334,24 +1361,24 @@ namespace mJiggAPI {
 				# Hook installation failed - low-level hooks may not work in PowerShell
 				# This is expected as WH_MOUSE_LL requires the hook procedure to be in a DLL
 				if ($DebugMode) {
-					Write-Host "  [WARN] Mouse wheel hook: Not available (requires DLL)" -ForegroundColor Yellow
+					Write-Host "  [WARN] Mouse wheel hook: Not available (requires DLL)" -ForegroundColor $script:TextWarning
 				}
 			} else {
 				if ($DebugMode) {
-					Write-Host "  [OK] Mouse wheel hook: Installed successfully" -ForegroundColor Green
+					Write-Host "  [OK] Mouse wheel hook: Installed successfully" -ForegroundColor $script:TextSuccess
 				}
 			}
 		} catch {
 			# Hook initialization failed, wheel detection will be disabled
 			# Silently continue - wheel detection is optional
 			if ($DebugMode) {
-				Write-Host "  [FAIL] Mouse wheel hook: Failed to install - $($_.Exception.Message)" -ForegroundColor Red
+				Write-Host "  [FAIL] Mouse wheel hook: Failed to install - $($_.Exception.Message)" -ForegroundColor $script:TextError
 			}
 		}
 		
 		# Initialize lastPos for mouse detection
 		if ($DebugMode) {
-			Write-Host "[DEBUG] Initializing mouse position tracking..." -ForegroundColor Cyan
+			Write-Host "[DEBUG] Initializing mouse position tracking..." -ForegroundColor $script:TextHighlight
 		}
 		try {
 			if ($null -eq $LastPos) {
@@ -1369,16 +1396,16 @@ namespace mJiggAPI {
 					throw "GetCursorPos method not available"
 				}
 				if ($DebugMode) {
-					Write-Host "  [OK] Initial mouse position: $($LastPos.X), $($LastPos.Y)" -ForegroundColor Green
+					Write-Host "  [OK] Initial mouse position: $($LastPos.X), $($LastPos.Y)" -ForegroundColor $script:TextSuccess
 				}
 			} else {
 				if ($DebugMode) {
-					Write-Host "  [OK] Mouse position already set: $($LastPos.X), $($LastPos.Y)" -ForegroundColor Green
+					Write-Host "  [OK] Mouse position already set: $($LastPos.X), $($LastPos.Y)" -ForegroundColor $script:TextSuccess
 				}
 			}
 		} catch {
 			if ($DebugMode) {
-				Write-Host "  [FAIL] Failed to get mouse position: $($_.Exception.Message)" -ForegroundColor Red
+				Write-Host "  [FAIL] Failed to get mouse position: $($_.Exception.Message)" -ForegroundColor $script:TextError
 			}
 			# Don't throw - mouse position tracking is optional
 		}
@@ -1516,6 +1543,26 @@ namespace mJiggAPI {
 				[string]$style = "simple"  # "arrows", "text", or "simple"
 			)
 			
+			# Define emoji arrows using ConvertFromUtf32 for cross-version compatibility
+			$arrowRight = [char]::ConvertFromUtf32(0x27A1)  # ➡
+			$arrowLeft = [char]::ConvertFromUtf32(0x2B05)   # ⬅
+			$arrowDown = [char]::ConvertFromUtf32(0x2B07)   # ⬇
+			$arrowUp = [char]::ConvertFromUtf32(0x2B06)     # ⬆
+			$arrowSE = [char]::ConvertFromUtf32(0x2198)     # ↘
+			$arrowNE = [char]::ConvertFromUtf32(0x2197)     # ↗
+			$arrowSW = [char]::ConvertFromUtf32(0x2199)     # ↙
+			$arrowNW = [char]::ConvertFromUtf32(0x2196)     # ↖
+			
+			# Simple arrows (BMP characters, work with [char])
+			$simpleRight = [char]0x2192  # →
+			$simpleLeft = [char]0x2190   # ←
+			$simpleDown = [char]0x2193   # ↓
+			$simpleUp = [char]0x2191     # ↑
+			$simpleSE = [char]0x2198     # ↘
+			$simpleNE = [char]0x2197     # ↗
+			$simpleSW = [char]0x2199     # ↙
+			$simpleNW = [char]0x2196     # ↖
+			
 			# Calculate angle and determine primary direction
 			# Use a threshold to determine if movement is primarily horizontal, vertical, or diagonal
 			$absX = [Math]::Abs($deltaX)
@@ -1534,20 +1581,20 @@ namespace mJiggAPI {
 				if ($style -eq "text") {
 					if ($deltaX -gt 0) { return "E" } else { return "W" }
 				} elseif ($style -eq "arrows") {
-					if ($deltaX -gt 0) { return "➡️" } else { return "⬅️" }
+					if ($deltaX -gt 0) { return $arrowRight } else { return $arrowLeft }
 				} else {
 					# simple style
-					if ($deltaX -gt 0) { return "→" } else { return "←" }
+					if ($deltaX -gt 0) { return $simpleRight } else { return $simpleLeft }
 				}
 			} elseif ($absY -gt $absX * 2) {
 				# Primarily vertical
 				if ($style -eq "text") {
 					if ($deltaY -gt 0) { return "S" } else { return "N" }
 				} elseif ($style -eq "arrows") {
-					if ($deltaY -gt 0) { return "⬇️" } else { return "⬆️" }
+					if ($deltaY -gt 0) { return $arrowDown } else { return $arrowUp }
 				} else {
-					# simple style (Unicode arrows via [char] for encoding-safe parse)
-					if ($deltaY -gt 0) { return [char]0x2193 } else { return [char]0x2191 }
+					# simple style
+					if ($deltaY -gt 0) { return $simpleDown } else { return $simpleUp }
 				}
 			} else {
 				# Diagonal movement
@@ -1563,28 +1610,30 @@ namespace mJiggAPI {
 					}
 				} elseif ($style -eq "arrows") {
 					if ($deltaX -gt 0 -and $deltaY -gt 0) {
-						return "↘️"
+						return $arrowSE
 					} elseif ($deltaX -gt 0 -and $deltaY -lt 0) {
-						return "↗️"
+						return $arrowNE
 					} elseif ($deltaX -lt 0 -and $deltaY -gt 0) {
-						return "↙️"
+						return $arrowSW
 					} else {
-						return "↖️"
+						return $arrowNW
 					}
 				} else {
-					# simple style (Unicode arrows via [char] for encoding-safe parse)
+					# simple style
 					if ($deltaX -gt 0 -and $deltaY -gt 0) {
-						return [char]0x2198
+						return $simpleSE
 					} elseif ($deltaX -gt 0 -and $deltaY -lt 0) {
-						return [char]0x2197
+						return $simpleNE
 					} elseif ($deltaX -lt 0 -and $deltaY -gt 0) {
-						return [char]0x2199
+						return $simpleSW
 					} else {
-						return [char]0x2196
+						return $simpleNW
 					}
 				}
 			}
 		}
+
+		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 3: About to define helper functions" | Out-File $script:StartupDiagFile -Append }
 
 		# Function to draw drop shadow for dialog boxes
 		function Draw-DialogShadow {
@@ -1592,7 +1641,8 @@ namespace mJiggAPI {
 				[int]$dialogX,
 				[int]$dialogY,
 				[int]$dialogWidth,
-				[int]$dialogHeight
+				[int]$dialogHeight,
+				[string]$shadowColor = "DarkGray"
 			)
 			
 			$shadowChar = [char]0x2591  # ░ light shade character
@@ -1601,20 +1651,18 @@ namespace mJiggAPI {
 			# The shadow should be one column to the right of the dialog
 			for ($i = 1; $i -le $dialogHeight; $i++) {
 				[Console]::SetCursorPosition($dialogX + $dialogWidth, $dialogY + $i)
-				Write-Host $shadowChar -NoNewline -ForegroundColor DarkGray
+				Write-Host $shadowChar -NoNewline -ForegroundColor $shadowColor
 			}
 			
-			# Draw shadow on bottom (one row below the dialog, starting from column 1 to avoid left corner)
-			# The shadow should be one row below the dialog bottom border
-			# Use dialogHeight + 1 to ensure it's definitely below the dialog
-			for ($i = 1; $i -le $dialogWidth; $i++) {
-				[Console]::SetCursorPosition($dialogX + $i, $dialogY + $dialogHeight + 1)
-				Write-Host $shadowChar -NoNewline -ForegroundColor DarkGray
-			}
-			
-			# Draw corner shadow (bottom-right corner, one row down and one column right)
-			[Console]::SetCursorPosition($dialogX + $dialogWidth, $dialogY + $dialogHeight + 1)
-			Write-Host $shadowChar -NoNewline -ForegroundColor DarkGray
+		# Draw shadow on bottom (one row below the dialog, starting from column 1 to avoid left corner)
+		for ($i = 1; $i -le $dialogWidth; $i++) {
+			[Console]::SetCursorPosition($dialogX + $i, $dialogY + $dialogHeight + 1)
+			Write-Host $shadowChar -NoNewline -ForegroundColor $shadowColor
+		}
+		
+		# Draw corner shadow (bottom-right corner, one row down and one column right)
+		[Console]::SetCursorPosition($dialogX + $dialogWidth, $dialogY + $dialogHeight + 1)
+		Write-Host $shadowChar -NoNewline -ForegroundColor $shadowColor
 		}
 		
 		# Function to clear drop shadow for dialog boxes
@@ -1632,15 +1680,15 @@ namespace mJiggAPI {
 				Write-Host " " -NoNewline
 			}
 			
-			# Clear shadow on bottom (one row below the dialog)
-			for ($i = 1; $i -le $dialogWidth; $i++) {
-				[Console]::SetCursorPosition($dialogX + $i, $dialogY + $dialogHeight + 1)
-				Write-Host " " -NoNewline
-			}
-			
-			# Clear corner shadow
-			[Console]::SetCursorPosition($dialogX + $dialogWidth, $dialogY + $dialogHeight + 1)
+		# Clear shadow on bottom (one row below the dialog)
+		for ($i = 1; $i -le $dialogWidth; $i++) {
+			[Console]::SetCursorPosition($dialogX + $i, $dialogY + $dialogHeight + 1)
 			Write-Host " " -NoNewline
+		}
+		
+		# Clear corner shadow
+		[Console]::SetCursorPosition($dialogX + $dialogWidth, $dialogY + $dialogHeight + 1)
+		Write-Host " " -NoNewline
 		}
 
 		# Function to show popup dialog for changing end time
@@ -1667,37 +1715,33 @@ namespace mJiggAPI {
 			
 			# Draw dialog box (exactly 35 characters per line)
 			# Calculate spacing for bottom line (emojis display as 2 chars each but count as 1 in string length)
-			$checkmark = [char]0x2705  # ✅ green checkmark
-			$redX = [char]0x274C  # ❌ red X
-			$pipeChar = [char]0x2502
-			$bottomLineContent = $pipeChar + "  " + $checkmark + "|(u)pdate  " + $redX + "|(c)ancel"
-			# Account for emojis: each emoji is 1 char in string but 2 display columns
-			# String length: pipe+2 spaces (3) + emoji (1) + "|" (1) + "(u)pdate  " (10) + emoji (1) + "|" (1) + "(c)ancel" (8) = 25
-			# Display width: pipe+2 spaces (3) + emoji (2) + "|" (1) + "(u)pdate  " (10) + emoji (2) + "|" (1) + "(c)ancel" (8) = 27
-			# So we need: 35 - 27 - 1 = 7 spaces before closing │
-			$bottomLineTextLength = $bottomLineContent.Length + 2  # +2 because emojis count as 2 display chars but 1 string char each
-			$bottomLinePadding = Get-Padding -usedWidth ($bottomLineTextLength + 1) -totalWidth $dialogWidth
+			$checkmark = [char]::ConvertFromUtf32(0x2705)  # ✅ green checkmark
+			$redX = [char]::ConvertFromUtf32(0x274C)  # ❌ red X
+			# Button line display width calculation:
+			# "$($script:BoxVertical) " (2) + checkmark (2) + "|" (1) + "(u)pdate" (8) + "  " (2) + redX (2) + "|" (1) + "(c)ancel" (8) = 26
+			# So we need: 35 - 26 - 1 = 8 spaces before closing $($script:BoxVertical)
+			$bottomLinePadding = 8
 			
-			# Build all lines to be exactly 35 characters using Get-Padding helper (box chars via [char] for encoding-safe parse)
-			$line0 = [char]0x250C + [string]::new([char]0x2500, 33) + [char]0x2510  # 35 chars
-			$line1Text = $pipeChar + "  Change End Time"
+			# Build all lines to be exactly 35 characters using Get-Padding helper
+			$line0 = "$($script:BoxTopLeft)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxTopRight)"  # 35 chars
+			$line1Text = "$($script:BoxVertical)  Change End Time"
 			$line1Padding = Get-Padding -usedWidth ($line1Text.Length + 1) -totalWidth $dialogWidth
-			$line1 = $line1Text + (" " * $line1Padding) + $pipeChar
+			$line1 = $line1Text + (" " * $line1Padding) + "$($script:BoxVertical)"
 			
-			$line2 = $pipeChar + (" " * 33) + $pipeChar  # 35 chars
+			$line2 = "$($script:BoxVertical)" + (" " * 33) + "$($script:BoxVertical)"  # 35 chars
 			
-			$line3Text = $pipeChar + "  Enter new time (HHmm format):"
+			$line3Text = "$($script:BoxVertical)  Enter new time (HHmm format):"
 			$line3Padding = Get-Padding -usedWidth ($line3Text.Length + 1) -totalWidth $dialogWidth
-			$line3 = $line3Text + (" " * $line3Padding) + $pipeChar
+			$line3 = $line3Text + (" " * $line3Padding) + "$($script:BoxVertical)"
 			
-			# Line 4 will be drawn separately with highlighted field (box chars via $pipeChar for encoding-safe parse)
-			$line4Text = $pipeChar + "  "
+			# Line 4 will be drawn separately with highlighted field
+			$line4Text = "$($script:BoxVertical)  "
 			$line4Padding = Get-Padding -usedWidth ($line4Text.Length + 1 + 6) -totalWidth $dialogWidth  # +6 for "[    ]"
-			$line4 = $line4Text + (" " * $line4Padding) + $pipeChar
+			$line4 = $line4Text + (" " * $line4Padding) + "$($script:BoxVertical)"
 			
-			$line5 = $pipeChar + (" " * 33) + $pipeChar  # 35 chars
+			$line5 = "$($script:BoxVertical)" + (" " * 33) + "$($script:BoxVertical)"  # 35 chars
 			
-			$line7 = [char]0x2514 + [string]::new([char]0x2500, 33) + [char]0x2518  # 35 chars
+			$line7 = "$($script:BoxBottomLeft)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxBottomRight)"  # 35 chars
 			
 			$dialogLines = @(
 				$line0,
@@ -1710,27 +1754,27 @@ namespace mJiggAPI {
 				$line7
 			)
 			
-			# Draw dialog background (clear area)
+			# Draw dialog background (clear area) with themed background
 			for ($i = 0; $i -lt $dialogHeight; $i++) {
 				[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-				Write-Host (" " * $dialogWidth) -NoNewline
+				Write-Host (" " * $dialogWidth) -NoNewline -BackgroundColor $script:TimeDialogBg
 			}
 			
-			# Draw dialog box
+			# Draw dialog box with themed background
 			for ($i = 0; $i -lt $dialogLines.Count; $i++) {
 				if ($i -eq 1) {
-					# Title line - write in magenta
+					# Title line
 					[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-					Write-Host ($pipeChar + "  ") -NoNewline
-					Write-Host "Change End Time" -NoNewline -ForegroundColor Magenta
-					$titleUsedWidth = 3 + "Change End Time".Length  # pipe+2 spaces + title
+					Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+					Write-Host "Change End Time" -NoNewline -ForegroundColor $script:TimeDialogTitle -BackgroundColor $script:TimeDialogBg
+					$titleUsedWidth = 3 + "Change End Time".Length  # "$($script:BoxVertical)  " + title
 					$titlePadding = Get-Padding -usedWidth ($titleUsedWidth + 1) -totalWidth $dialogWidth
-					Write-Host (" " * $titlePadding) -NoNewline
-					Write-Host $pipeChar -NoNewline
+					Write-Host (" " * $titlePadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+					Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 				} elseif ($i -eq 4) {
-					# Input field line - draw with highlighted field (same style as modify movement dialog)
+					# Input field line - draw with highlighted field
 					[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-					Write-Host ($pipeChar + "  ") -NoNewline
+					Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 					# Get initial time input value for display
 					$initialTimeDisplay = if ($currentEndTime -ne -1 -and $currentEndTime -ne 0) { 
 						$currentEndTime.ToString().PadLeft(4, '0') 
@@ -1738,46 +1782,51 @@ namespace mJiggAPI {
 						"" 
 					}
 					$fieldDisplay = $initialTimeDisplay.PadRight(4)
-					# Draw highlighted field (same style as modify movement dialog)
-					Write-Host "[" -NoNewline
-					Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-					Write-Host "]" -NoNewline
+					# Draw highlighted field
+					Write-Host "[" -NoNewline -ForegroundColor $script:TimeDialogText -BackgroundColor $script:TimeDialogBg
+					Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+					Write-Host "]" -NoNewline -ForegroundColor $script:TimeDialogText -BackgroundColor $script:TimeDialogBg
 					# Calculate padding to fill remaining width
-					$fieldUsedWidth = 3 + 6  # pipe+2 spaces + field (6 chars)
+					$fieldUsedWidth = 3 + 6  # "$($script:BoxVertical)  " + "[    ]"
 					$fieldPadding = Get-Padding -usedWidth ($fieldUsedWidth + 1) -totalWidth $dialogWidth
-					Write-Host (" " * $fieldPadding) -NoNewline
-					Write-Host $pipeChar -NoNewline
+					Write-Host (" " * $fieldPadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+					Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 				} elseif ($i -eq 6) {
 					# Bottom line - write with colored icons and hotkey letters
 					[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-					Write-Host ($pipeChar + "  ") -NoNewline
-					Write-Host $checkmark -NoNewline -ForegroundColor Green
-					Write-Host "|" -NoNewline
+					Write-Host "$($script:BoxVertical) " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+					$checkmarkX = $dialogX + 2
+					Write-Host $checkmark -NoNewline -ForegroundColor $script:TextSuccess -BackgroundColor $script:TimeDialogButtonBg
+					[Console]::SetCursorPosition($checkmarkX + 2, $dialogY + $i)
+					Write-Host "|" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
 					# Parse "(u)pdate" - parentheses white, letter yellow, text white
-					Write-Host "(" -NoNewline
-					Write-Host "u" -NoNewline -ForegroundColor Yellow
-					Write-Host ")pdate  " -NoNewline
-					Write-Host $redX -NoNewline -ForegroundColor Red
-					Write-Host "|" -NoNewline
+					Write-Host "(" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
+					Write-Host "u" -NoNewline -ForegroundColor $script:TimeDialogButtonHotkey -BackgroundColor $script:TimeDialogButtonBg
+					Write-Host ")pdate" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
+					Write-Host "  " -NoNewline -BackgroundColor $script:TimeDialogBg
+					$redXX = $Host.UI.RawUI.CursorPosition.X
+					Write-Host $redX -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:TimeDialogButtonBg
+					[Console]::SetCursorPosition($redXX + 2, $dialogY + $i)
+					Write-Host "|" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
 					# Parse "(c)ancel" - parentheses white, letter yellow, text white
-					Write-Host "(" -NoNewline
-					Write-Host "c" -NoNewline -ForegroundColor Yellow
-					Write-Host ")ancel" -NoNewline
-					Write-Host (" " * $bottomLinePadding) -NoNewline
-					Write-Host $pipeChar -NoNewline
+					Write-Host "(" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
+					Write-Host "c" -NoNewline -ForegroundColor $script:TimeDialogButtonHotkey -BackgroundColor $script:TimeDialogButtonBg
+					Write-Host ")ancel" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
+					Write-Host (" " * $bottomLinePadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+					Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 				} else {
 					[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-					Write-Host $dialogLines[$i] -NoNewline
+					Write-Host $dialogLines[$i] -NoNewline -ForegroundColor $script:TimeDialogText -BackgroundColor $script:TimeDialogBg
 				}
 			}
 			
 			# Draw drop shadow
-			Draw-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight
+			Draw-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight -shadowColor $script:TimeDialogShadow
 			
 			# Calculate button bounds for click detection
 			# Button row is at dialogY + 6 (line 6)
 			$buttonRowY = $dialogY + 6
-			# Update button: starts at dialogX + 3 (pipe+2 spaces = 3 chars), emoji (2 display chars) + pipe (1) = 6 chars
+			# Update button: starts at dialogX + 3 ("$($script:BoxVertical)  " = 3 chars), emoji (2 display chars) + pipe (1) = 6 chars
 			# "(u)pdate  " = 10 chars, so update button spans from X+3 to X+15 (inclusive)
 			$updateButtonStartX = $dialogX + 3
 			$updateButtonEndX = $dialogX + 15  # 3 + 2 (emoji) + 1 (pipe) + 10 (text) - 1 (inclusive)
@@ -1797,8 +1846,8 @@ namespace mJiggAPI {
 			}
 			$script:DialogButtonClick = $null  # Clear any previous click  # 20 + 2 (emoji) + 1 (pipe) + 8 (text) - 1 (inclusive)
 			
-			# Position cursor in input field (inside the brackets, after pipe+2 spaces + "[")
-			# Line 4 is pipe+2 spaces + "[" + 4 spaces + "]", so input starts at position 4
+			# Position cursor in input field (inside the brackets, after "$($script:BoxVertical)  [")
+			# Line 4 is "$($script:BoxVertical)  [" + 4 spaces + "]", so input starts at position 4
 			$inputX = $dialogX + 4
 			$inputY = $dialogY + 4
 			# Don't show cursor initially - will be shown after first character is typed
@@ -1878,85 +1927,90 @@ namespace mJiggAPI {
 						cancelEndX = $cancelButtonEndX
 					}
 					
-					# Clear screen and redraw dialog
+					# Clear screen and redraw dialog with themed background
 					Clear-Host
 					for ($i = 0; $i -lt $dialogLines.Count; $i++) {
 						if ($i -eq 1) {
-							# Title line - write in magenta
+							# Title line
 							[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-							Write-Host ([char]0x2502 + "  ") -NoNewline
-							Write-Host "Change End Time" -NoNewline -ForegroundColor Magenta
-							$titleUsedWidth = 3 + "Change End Time".Length  # pipe+2 spaces + title
+							Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+							Write-Host "Change End Time" -NoNewline -ForegroundColor $script:TimeDialogTitle -BackgroundColor $script:TimeDialogBg
+							$titleUsedWidth = 3 + "Change End Time".Length  # "$($script:BoxVertical)  " + title
 							$titlePadding = Get-Padding -usedWidth ($titleUsedWidth + 1) -totalWidth $dialogWidth
-							Write-Host (" " * $titlePadding) -NoNewline
-							Write-Host ([char]0x2502) -NoNewline
+							Write-Host (" " * $titlePadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+							Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 						} elseif ($i -eq 4) {
 							# Input field line - draw with highlighted field
 							[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-							Write-Host ([char]0x2502 + "  ") -NoNewline
+							Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 							$fieldDisplay = $timeInput.PadRight(4)
-							# Draw highlighted field (same style as modify movement dialog)
-							Write-Host "[" -NoNewline
-							Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-							Write-Host "]" -NoNewline
+							# Draw highlighted field
+							Write-Host "[" -NoNewline -ForegroundColor $script:TimeDialogText -BackgroundColor $script:TimeDialogBg
+							Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+							Write-Host "]" -NoNewline -ForegroundColor $script:TimeDialogText -BackgroundColor $script:TimeDialogBg
 							# Calculate padding to fill remaining width
-							$fieldUsedWidth = 3 + 6  # pipe+2 spaces + field (6 chars)
+							$fieldUsedWidth = 3 + 6  # "$($script:BoxVertical)  " + "[    ]"
 							$fieldPadding = Get-Padding -usedWidth ($fieldUsedWidth + 1) -totalWidth $dialogWidth
-							Write-Host (" " * $fieldPadding) -NoNewline
-							Write-Host ([char]0x2502) -NoNewline
+							Write-Host (" " * $fieldPadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+							Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 						} elseif ($i -eq 6) {
 							# Bottom line - write with colored icons and hotkey letters
 							[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-							Write-Host ([char]0x2502 + "  ") -NoNewline
-							Write-Host $checkmark -NoNewline -ForegroundColor Green
-							Write-Host "|" -NoNewline
+							Write-Host "$($script:BoxVertical) " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+							$checkmarkX = $dialogX + 2
+							Write-Host $checkmark -NoNewline -ForegroundColor $script:TextSuccess -BackgroundColor $script:TimeDialogButtonBg
+							[Console]::SetCursorPosition($checkmarkX + 2, $dialogY + $i)
+							Write-Host "|" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
 							# Parse "(u)pdate" - parentheses white, letter yellow, text white
-							Write-Host "(" -NoNewline
-							Write-Host "u" -NoNewline -ForegroundColor Yellow
-							Write-Host ")pdate  " -NoNewline
-							Write-Host $redX -NoNewline -ForegroundColor Red
-							Write-Host "|" -NoNewline
+							Write-Host "(" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
+							Write-Host "u" -NoNewline -ForegroundColor $script:TimeDialogButtonHotkey -BackgroundColor $script:TimeDialogButtonBg
+							Write-Host ")pdate" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
+							Write-Host "  " -NoNewline -BackgroundColor $script:TimeDialogBg
+							$redXX = $Host.UI.RawUI.CursorPosition.X
+							Write-Host $redX -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:TimeDialogButtonBg
+							[Console]::SetCursorPosition($redXX + 2, $dialogY + $i)
+							Write-Host "|" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
 							# Parse "(c)ancel" - parentheses white, letter yellow, text white
-							Write-Host "(" -NoNewline
-							Write-Host "c" -NoNewline -ForegroundColor Yellow
-							Write-Host ")ancel" -NoNewline
-							Write-Host (" " * $bottomLinePadding) -NoNewline
-							Write-Host ([char]0x2502) -NoNewline
+							Write-Host "(" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
+							Write-Host "c" -NoNewline -ForegroundColor $script:TimeDialogButtonHotkey -BackgroundColor $script:TimeDialogButtonBg
+							Write-Host ")ancel" -NoNewline -ForegroundColor $script:TimeDialogButtonText -BackgroundColor $script:TimeDialogButtonBg
+							Write-Host (" " * $bottomLinePadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+							Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 						} else {
 							[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-							Write-Host $dialogLines[$i] -NoNewline
+							Write-Host $dialogLines[$i] -NoNewline -ForegroundColor $script:TimeDialogText -BackgroundColor $script:TimeDialogBg
 						}
 					}
 					
 					# Draw drop shadow
-					Draw-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight
+					Draw-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight -shadowColor $script:TimeDialogShadow
 					
 					# Reposition cursor and redraw input with highlight - redraw entire line 4
 					[Console]::SetCursorPosition($dialogX, $inputY)
-					Write-Host ([char]0x2502 + "  ") -NoNewline  # Redraw left border
+					Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw left border
 					$fieldDisplay = $timeInput.PadRight(4)
-					Write-Host "[" -NoNewline
-					Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-					Write-Host "]" -NoNewline
+					Write-Host "[" -NoNewline -ForegroundColor $script:TimeDialogText -BackgroundColor $script:TimeDialogBg
+					Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+					Write-Host "]" -NoNewline -ForegroundColor $script:TimeDialogText -BackgroundColor $script:TimeDialogBg
 					# Calculate padding to fill remaining width
-					$fieldUsedWidth = 3 + 6  # pipe+2 spaces + field (6 chars)
+					$fieldUsedWidth = 3 + 6  # "$($script:BoxVertical)  " + "[    ]"
 					$fieldPadding = Get-Padding -usedWidth ($fieldUsedWidth + 1) -totalWidth $dialogWidth
-					Write-Host (" " * $fieldPadding) -NoNewline
-					Write-Host ([char]0x2502) -NoNewline  # Redraw right border
+					Write-Host (" " * $fieldPadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+					Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw right border
 					# Redraw error line if there's an error
 					[Console]::SetCursorPosition($dialogX, $dialogY + 5)
 					if ($errorMessage -ne "") {
-						Write-Host ([char]0x2502 + "  ") -NoNewline
-						Write-Host $errorMessage -NoNewline -ForegroundColor Red
-						$errorLineUsedWidth = 3 + $errorMessage.Length  # pipe+2 spaces + error message
+						Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+						Write-Host $errorMessage -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:TimeDialogBg
+						$errorLineUsedWidth = 3 + $errorMessage.Length  # "$($script:BoxVertical)  " + error message
 						$errorLinePadding = Get-Padding -usedWidth ($errorLineUsedWidth + 1) -totalWidth $dialogWidth
-						Write-Host (" " * $errorLinePadding) -NoNewline
-						Write-Host ([char]0x2502) -NoNewline
+						Write-Host (" " * $errorLinePadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+						Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 					} else {
 						# Clear error line but keep box lines
-						Write-Host ([char]0x2502) -NoNewline
-						Write-Host (" " * ($dialogWidth - 2)) -NoNewline
-						Write-Host ([char]0x2502) -NoNewline
+						Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+						Write-Host (" " * ($dialogWidth - 2)) -NoNewline -BackgroundColor $script:TimeDialogBg
+						Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 					}
 					# Position cursor at end of input (after opening bracket)
 					[Console]::SetCursorPosition($inputX + $timeInput.Length, $inputY)
@@ -2478,24 +2532,24 @@ namespace mJiggAPI {
 								$errorMessage = "Hours out of range (00-23)"
 								# Redraw input field with highlight - redraw entire line 4
 								[Console]::SetCursorPosition($dialogX, $inputY)
-								Write-Host ([char]0x2502 + "  ") -NoNewline  # Redraw left border
+								Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw left border
 								$fieldDisplay = $timeInput.PadRight(4)
-								Write-Host "[" -NoNewline
-								Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-								Write-Host "]" -NoNewline
+								Write-Host "[" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+								Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+								Write-Host "]" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 								# Calculate padding to fill remaining width
-								$fieldUsedWidth = 3 + 6  # pipe+2 spaces + field (6 chars)
+								$fieldUsedWidth = 3 + 6  # "$($script:BoxVertical)  " + "[    ]"
 								$fieldPadding = Get-Padding -usedWidth ($fieldUsedWidth + 1) -totalWidth $dialogWidth
-								Write-Host (" " * $fieldPadding) -NoNewline
-								Write-Host ([char]0x2502) -NoNewline  # Redraw right border
+								Write-Host (" " * $fieldPadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+								Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw right border
 								# Show error
 								[Console]::SetCursorPosition($dialogX, $dialogY + 5)
-								Write-Host ([char]0x2502 + "  ") -NoNewline
-								Write-Host $errorMessage -NoNewline -ForegroundColor Red
-								$errorLineUsedWidth = 3 + $errorMessage.Length  # pipe+2 spaces + error message
+								Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+								Write-Host $errorMessage -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:TimeDialogBg
+								$errorLineUsedWidth = 3 + $errorMessage.Length  # "$($script:BoxVertical)  " + error message
 								$errorLinePadding = Get-Padding -usedWidth ($errorLineUsedWidth + 1) -totalWidth $dialogWidth
-								Write-Host (" " * $errorLinePadding) -NoNewline
-								Write-Host ([char]0x2502) -NoNewline
+								Write-Host (" " * $errorLinePadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+								Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 								[Console]::SetCursorPosition($inputX + 1 + $timeInput.Length, $inputY)
 							}
 						} catch {
@@ -2503,24 +2557,24 @@ namespace mJiggAPI {
 							$errorMessage = "Invalid hours"
 							# Redraw input field with highlight - redraw entire line 4
 							[Console]::SetCursorPosition($dialogX, $inputY)
-							Write-Host ([char]0x2502 + "  ") -NoNewline  # Redraw left border
+							Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw left border
 							$fieldDisplay = $timeInput.PadRight(4)
-							Write-Host "[" -NoNewline
-							Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-							Write-Host "]" -NoNewline
+							Write-Host "[" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+							Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+							Write-Host "]" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 							# Calculate padding to fill remaining width
-							$fieldUsedWidth = 3 + 6  # pipe+2 spaces + field (6 chars)
+							$fieldUsedWidth = 3 + 6  # "$($script:BoxVertical)  " + "[    ]"
 							$fieldPadding = Get-Padding -usedWidth ($fieldUsedWidth + 1) -totalWidth $dialogWidth
-							Write-Host (" " * $fieldPadding) -NoNewline
-							Write-Host ([char]0x2502) -NoNewline  # Redraw right border
+							Write-Host (" " * $fieldPadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+							Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw right border
 							# Show error
 							[Console]::SetCursorPosition($dialogX, $dialogY + 5)
-							Write-Host ([char]0x2502 + "  ") -NoNewline
-							Write-Host $errorMessage -NoNewline -ForegroundColor Red
-							$errorLineUsedWidth = 3 + $errorMessage.Length  # pipe+2 spaces + error message
+							Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+							Write-Host $errorMessage -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:TimeDialogBg
+							$errorLineUsedWidth = 3 + $errorMessage.Length  # "$($script:BoxVertical)  " + error message
 							$errorLinePadding = Get-Padding -usedWidth ($errorLineUsedWidth + 1) -totalWidth $dialogWidth
-							Write-Host (" " * $errorLinePadding) -NoNewline
-							Write-Host ([char]0x2502) -NoNewline
+							Write-Host (" " * $errorLinePadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+							Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 							[Console]::SetCursorPosition($inputX + 1 + $timeInput.Length, $inputY)
 						}
 					} elseif ($timeInput.Length -eq 4) {
@@ -2545,24 +2599,24 @@ namespace mJiggAPI {
 								}
 								# Redraw input field with highlight - redraw entire line 4
 								[Console]::SetCursorPosition($dialogX, $inputY)
-								Write-Host ([char]0x2502 + "  ") -NoNewline  # Redraw left border
+								Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw left border
 								$fieldDisplay = $timeInput.PadRight(4)
-								Write-Host "[" -NoNewline
-								Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-								Write-Host "]" -NoNewline
+								Write-Host "[" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+								Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+								Write-Host "]" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 								# Calculate padding to fill remaining width
-								$fieldUsedWidth = 3 + 6  # pipe+2 spaces + field (6 chars)
+								$fieldUsedWidth = 3 + 6  # "$($script:BoxVertical)  " + "[    ]"
 								$fieldPadding = Get-Padding -usedWidth ($fieldUsedWidth + 1) -totalWidth $dialogWidth
-								Write-Host (" " * $fieldPadding) -NoNewline
-								Write-Host ([char]0x2502) -NoNewline  # Redraw right border
+								Write-Host (" " * $fieldPadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+								Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw right border
 								# Show error
 								[Console]::SetCursorPosition($dialogX, $dialogY + 5)
-								Write-Host ([char]0x2502 + "  ") -NoNewline
-								Write-Host $errorMessage -NoNewline -ForegroundColor Red
-								$errorLineUsedWidth = 3 + $errorMessage.Length  # pipe+2 spaces + error message
+								Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+								Write-Host $errorMessage -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:TimeDialogBg
+								$errorLineUsedWidth = 3 + $errorMessage.Length  # "$($script:BoxVertical)  " + error message
 								$errorLinePadding = Get-Padding -usedWidth ($errorLineUsedWidth + 1) -totalWidth $dialogWidth
-								Write-Host (" " * $errorLinePadding) -NoNewline
-								Write-Host ([char]0x2502) -NoNewline
+								Write-Host (" " * $errorLinePadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+								Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 								[Console]::SetCursorPosition($inputX + 1 + $timeInput.Length, $inputY)
 							}
 						} catch {
@@ -2570,24 +2624,24 @@ namespace mJiggAPI {
 							$errorMessage = "Number out of range"
 							# Redraw input field with highlight - redraw entire line 4
 							[Console]::SetCursorPosition($dialogX, $inputY)
-							Write-Host ([char]0x2502 + "  ") -NoNewline  # Redraw left border
+							Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw left border
 							$fieldDisplay = $timeInput.PadRight(4)
-							Write-Host "[" -NoNewline
-							Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-							Write-Host "]" -NoNewline
+							Write-Host "[" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+							Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+							Write-Host "]" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 							# Calculate padding to fill remaining width
-							$fieldUsedWidth = 3 + 6  # pipe+2 spaces + field (6 chars)
+							$fieldUsedWidth = 3 + 6  # "$($script:BoxVertical)  " + "[    ]"
 							$fieldPadding = Get-Padding -usedWidth ($fieldUsedWidth + 1) -totalWidth $dialogWidth
-							Write-Host (" " * $fieldPadding) -NoNewline
-							Write-Host ([char]0x2502) -NoNewline  # Redraw right border
+							Write-Host (" " * $fieldPadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+							Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw right border
 							# Show error
 							[Console]::SetCursorPosition($dialogX, $dialogY + 5)
-							Write-Host ([char]0x2502 + "  ") -NoNewline
-							Write-Host $errorMessage -NoNewline -ForegroundColor Red
-							$errorLineUsedWidth = 3 + $errorMessage.Length  # pipe+2 spaces + error message
+							Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+							Write-Host $errorMessage -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:TimeDialogBg
+							$errorLineUsedWidth = 3 + $errorMessage.Length  # "$($script:BoxVertical)  " + error message
 							$errorLinePadding = Get-Padding -usedWidth ($errorLineUsedWidth + 1) -totalWidth $dialogWidth
-							Write-Host (" " * $errorLinePadding) -NoNewline
-							Write-Host ([char]0x2502) -NoNewline
+							Write-Host (" " * $errorLinePadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+							Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 							[Console]::SetCursorPosition($inputX + 1 + $timeInput.Length, $inputY)
 						}
 					} else {
@@ -2595,24 +2649,24 @@ namespace mJiggAPI {
 						$errorMessage = "Enter 4 digits (HHmm format)"
 						# Redraw input field with highlight - redraw entire line 4
 						[Console]::SetCursorPosition($dialogX, $inputY)
-						Write-Host ([char]0x2502 + "  ") -NoNewline  # Redraw left border
+						Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw left border
 						$fieldDisplay = $timeInput.PadRight(4)
-						Write-Host "[" -NoNewline
-						Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-						Write-Host "]" -NoNewline
+						Write-Host "[" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+						Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+						Write-Host "]" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 						# Calculate padding to fill remaining width
-						$fieldUsedWidth = 3 + 6  # pipe+2 spaces + field (6 chars)
+						$fieldUsedWidth = 3 + 6  # "$($script:BoxVertical)  " + "[    ]"
 						$fieldPadding = Get-Padding -usedWidth ($fieldUsedWidth + 1) -totalWidth $dialogWidth
-						Write-Host (" " * $fieldPadding) -NoNewline
-						Write-Host ([char]0x2502) -NoNewline  # Redraw right border
+						Write-Host (" " * $fieldPadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+						Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw right border
 						# Show error
 						[Console]::SetCursorPosition($dialogX, $dialogY + 5)
-						Write-Host ([char]0x2502 + "  ") -NoNewline
-						Write-Host $errorMessage -NoNewline -ForegroundColor Red
-						$errorLineUsedWidth = 3 + $errorMessage.Length  # pipe+2 spaces + error message
+						Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+						Write-Host $errorMessage -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:TimeDialogBg
+						$errorLineUsedWidth = 3 + $errorMessage.Length  # "$($script:BoxVertical)  " + error message
 						$errorLinePadding = Get-Padding -usedWidth ($errorLineUsedWidth + 1) -totalWidth $dialogWidth
-						Write-Host (" " * $errorLinePadding) -NoNewline
-						Write-Host ([char]0x2502) -NoNewline
+						Write-Host (" " * $errorLinePadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+						Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 						[Console]::SetCursorPosition($inputX + 1 + $timeInput.Length, $inputY)
 					}
 				} elseif ($char -eq "c" -or $char -eq "C" -or $char -eq "t" -or $char -eq "T" -or $key -eq "Escape" -or ($null -ne $keyInfo -and $keyInfo.VirtualKeyCode -eq 27)) {
@@ -2655,21 +2709,21 @@ namespace mJiggAPI {
 						$errorMessage = ""  # Clear error when editing
 						# Redraw input with highlight - redraw entire line 4 to ensure clean overwrite
 						[Console]::SetCursorPosition($dialogX, $inputY)
-						Write-Host ([char]0x2502 + "  ") -NoNewline  # Redraw left border
+						Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw left border
 						$fieldDisplay = $timeInput.PadRight(4)
-						Write-Host "[" -NoNewline
-						Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-						Write-Host "]" -NoNewline
+						Write-Host "[" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+						Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+						Write-Host "]" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 						# Calculate padding to fill remaining width
-						$fieldUsedWidth = 3 + 6  # pipe+2 spaces + field (6 chars)
+						$fieldUsedWidth = 3 + 6  # "$($script:BoxVertical)  " + "[    ]"
 						$fieldPadding = Get-Padding -usedWidth ($fieldUsedWidth + 1) -totalWidth $dialogWidth
-						Write-Host (" " * $fieldPadding) -NoNewline
-						Write-Host ([char]0x2502) -NoNewline  # Redraw right border
+						Write-Host (" " * $fieldPadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+						Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw right border
 						# Clear and redraw error line with box lines
 						[Console]::SetCursorPosition($dialogX, $dialogY + 5)
-						Write-Host ([char]0x2502) -NoNewline
-						Write-Host (" " * 33) -NoNewline
-						Write-Host ([char]0x2502) -NoNewline
+						Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+						Write-Host (" " * 33) -NoNewline -BackgroundColor $script:TimeDialogBg
+						Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 						# Position cursor at end of input (only if field has content, after opening bracket)
 						if ($timeInput.Length -gt 0) {
 							[Console]::SetCursorPosition($inputX + $timeInput.Length, $inputY)
@@ -2688,21 +2742,21 @@ namespace mJiggAPI {
 					$errorMessage = ""  # Clear error when typing
 					# Redraw input field with highlight - redraw entire line 4 to ensure clean overwrite
 					[Console]::SetCursorPosition($dialogX, $inputY)
-					Write-Host ([char]0x2502 + "  ") -NoNewline  # Redraw left border
+					Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw left border
 					$fieldDisplay = $timeInput.PadRight(4)
-					Write-Host "[" -NoNewline
-					Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-					Write-Host "]" -NoNewline
+					Write-Host "[" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+					Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+					Write-Host "]" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 					# Calculate padding to fill remaining width
-					$fieldUsedWidth = 3 + 6  # pipe+2 spaces + field (6 chars)
+					$fieldUsedWidth = 3 + 6  # "$($script:BoxVertical)  " + "[    ]"
 					$fieldPadding = Get-Padding -usedWidth ($fieldUsedWidth + 1) -totalWidth $dialogWidth
-					Write-Host (" " * $fieldPadding) -NoNewline
-					Write-Host ([char]0x2502) -NoNewline  # Redraw right border
+					Write-Host (" " * $fieldPadding) -NoNewline -BackgroundColor $script:TimeDialogBg
+					Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg  # Redraw right border
 					# Clear error line if it was showing, redraw box lines
 					[Console]::SetCursorPosition($dialogX, $dialogY + 5)
-					Write-Host ([char]0x2502) -NoNewline
-					Write-Host (" " * 33) -NoNewline
-					Write-Host ([char]0x2502) -NoNewline
+					Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
+					Write-Host (" " * 33) -NoNewline -BackgroundColor $script:TimeDialogBg
+					Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:TimeDialogBorder -BackgroundColor $script:TimeDialogBg
 					# Position cursor at end of input (after opening bracket)
 					[Console]::SetCursorPosition($inputX + $timeInput.Length, $inputY)
 				}
@@ -2740,6 +2794,203 @@ namespace mJiggAPI {
 			}
 		}
 
+		# ============================================
+		# Performance Helper Functions
+		# ============================================
+		
+		# Playful quotes for resize screen
+		$script:ResizeQuotes = @(
+			"Jiggling since the dawn of idle timeouts..."
+			"A mouse in motion stays employed"
+			"Wiggle wiggle wiggle"
+			"Like jello, but for your cursor"
+			"Making mice dance since 2024"
+			"The early mouse gets the jiggle"
+			"Shake it like a Polaroid picture"
+			"Keep calm and jiggle on"
+			"This mouse has moves"
+			"Cursor cardio in progress"
+			"Staying active so you don't have to"
+			"Mice just wanna have fun"
+			"Jiggle physics: enabled"
+			"Not all who wander are lost, some are jiggling"
+			"Professional mouse motivator"
+			"Your mouse's personal trainer"
+			"Wiggling through the workday"
+		)
+		$script:CurrentResizeQuote = $null
+		
+		# Helper function: Draw centered logo during window resize using buffered output
+		function Draw-ResizeLogo {
+			try {
+				$rawUI = $Host.UI.RawUI
+				$winSize = $rawUI.WindowSize
+				$winWidth = $winSize.Width
+				$winHeight = $winSize.Height
+				
+				# Only draw if window is large enough
+				if ($winWidth -lt 16 -or $winHeight -lt 14) {
+					return
+				}
+				
+				# Select a random quote if we don't have one yet
+				if ($null -eq $script:CurrentResizeQuote) {
+					$script:CurrentResizeQuote = $script:ResizeQuotes | Get-Random
+				}
+				
+				# Box-drawing characters
+				$boxTL = [char]0x250C      # ┌
+				$boxTR = [char]0x2510      # ┐
+				$boxBL = [char]0x2514      # └
+				$boxBR = [char]0x2518      # ┘
+				$boxH = [char]0x2500       # ─
+				$boxV = [char]0x2502       # │
+				
+				# Logo display width: mJig( (5) + emoji (2) + ) (1) = 8
+				$logoDisplayWidth = 8
+				
+				# Calculate center position for logo
+				$centerX = [math]::Floor(($winWidth - $logoDisplayWidth) / 2)
+				$centerY = [math]::Floor($winHeight / 2)
+				
+				# Box dimensions: scale with screen size while maintaining minimum padding
+				$minPadding = 3
+				# Calculate available space around logo
+				$availableH = [math]::Min($centerX - 1, $winWidth - $centerX - $logoDisplayWidth - 1)
+				$availableV = [math]::Min($centerY - 1, $winHeight - $centerY - 2)
+				# Use 42% of available space as padding, with minimum
+				$boxPaddingH = [math]::Max($minPadding * 2, [math]::Floor($availableH * 0.42))
+				$boxPaddingV = [math]::Max($minPadding, [math]::Floor($availableV * 0.42))
+				$boxLeft = $centerX - $boxPaddingH - 1
+				$boxRight = $centerX + $logoDisplayWidth + $boxPaddingH
+				$boxTop = $centerY - $boxPaddingV - 1
+				$boxBottom = $centerY + $boxPaddingV + 1
+				$boxInnerWidth = $boxRight - $boxLeft - 1
+				
+				# Build horizontal line string once
+				$hLine = [string]::new($boxH, $boxInnerWidth)
+				
+				# Draw top border
+				[Console]::SetCursorPosition($boxLeft, $boxTop)
+				[Console]::Write("$boxTL$hLine$boxTR")
+				
+				# Draw side borders  
+				for ($y = $boxTop + 1; $y -lt $boxBottom; $y++) {
+					[Console]::SetCursorPosition($boxLeft, $y)
+					[Console]::Write($boxV)
+					[Console]::SetCursorPosition($boxRight, $y)
+					[Console]::Write($boxV)
+				}
+				
+				# Draw bottom border
+				[Console]::SetCursorPosition($boxLeft, $boxBottom)
+				[Console]::Write("$boxBL$hLine$boxBR")
+				
+				# Draw logo
+				[Console]::SetCursorPosition($centerX, $centerY)
+				Write-Host "mJig(" -NoNewline -ForegroundColor $script:ResizeLogoName
+				$emojiX = [Console]::CursorLeft
+				Write-Host ([char]::ConvertFromUtf32(0x1F400)) -NoNewline -ForegroundColor $script:ResizeLogoIcon
+				[Console]::SetCursorPosition($emojiX + 2, $centerY)
+				Write-Host ")" -NoNewline -ForegroundColor $script:ResizeLogoName
+				
+				# Draw quote 2 lines below logo (if it fits)
+				$quoteY = $centerY + 2
+				if ($quoteY -lt $boxBottom -and $null -ne $script:CurrentResizeQuote) {
+					$quote = $script:CurrentResizeQuote
+					# Truncate quote if too wide for box
+					$maxQuoteWidth = $boxInnerWidth - 2
+					if ($quote.Length -gt $maxQuoteWidth) {
+						$quote = $quote.Substring(0, $maxQuoteWidth - 3) + "..."
+					}
+					$quoteX = [math]::Floor(($winWidth - $quote.Length) / 2)
+					[Console]::SetCursorPosition($quoteX, $quoteY)
+					Write-Host $quote -NoNewline -ForegroundColor $script:ResizeQuoteText
+				}
+				
+			} catch {
+				# Fallback to simple centered text if buffer method fails
+				try {
+					$winSize = $Host.UI.RawUI.WindowSize
+					$centerX = [math]::Max(0, [math]::Floor(($winSize.Width - 8) / 2))
+					$centerY = [math]::Max(0, [math]::Floor($winSize.Height / 2))
+					[Console]::SetCursorPosition($centerX, $centerY)
+					Write-Host "mJig(" -NoNewline -ForegroundColor $script:ResizeLogoName
+					Write-Host ([char]::ConvertFromUtf32(0x1F400)) -NoNewline -ForegroundColor $script:ResizeLogoIcon
+					Write-Host ")" -NoNewline -ForegroundColor $script:ResizeLogoName
+				} catch {
+					# Ignore all errors
+				}
+			}
+		}
+		
+		# Helper function: Get method safely (cached for performance)
+		function Get-CachedMethod {
+			param(
+				$type,
+				[string]$methodName
+			)
+			$cacheKey = "$($type.FullName).$methodName"
+			if (-not $script:MethodCache.ContainsKey($cacheKey)) {
+				$script:MethodCache[$cacheKey] = $type.GetMethod($methodName)
+			}
+			return $script:MethodCache[$cacheKey]
+		}
+		
+		# Helper function: Get mouse position (uses cached method)
+		function Get-MousePosition {
+			$point = New-Object mJiggAPI.POINT
+			$mouseType = [mJiggAPI.Mouse]
+			$getCursorPosMethod = Get-CachedMethod -type $mouseType -methodName "GetCursorPos"
+			if ($null -ne $getCursorPosMethod -and [mJiggAPI.Mouse]::GetCursorPos([ref]$point)) {
+				return New-Object System.Drawing.Point($point.X, $point.Y)
+			}
+			return $null
+		}
+		
+		# Helper function: Check mouse movement threshold
+		function Test-MouseMoved {
+			param(
+				[System.Drawing.Point]$currentPos,
+				[System.Drawing.Point]$lastPos,
+				[int]$threshold = 2
+			)
+			if ($null -eq $lastPos) { return $false }
+			$deltaX = [Math]::Abs($currentPos.X - $lastPos.X)
+			$deltaY = [Math]::Abs($currentPos.Y - $lastPos.Y)
+			return ($deltaX -gt $threshold -or $deltaY -gt $threshold)
+		}
+		
+		# Helper function: Calculate time since (in milliseconds)
+		# Returns MaxValue if startTime is null (allows safe comparison without null checks)
+		function Get-TimeSinceMs {
+			param($startTime)
+			if ($null -eq $startTime) { return [double]::MaxValue }
+			return ((Get-Date) - [DateTime]$startTime).TotalMilliseconds
+		}
+		
+		# Helper function: Calculate value with random variance
+		function Get-ValueWithVariance {
+			param([double]$baseValue, [double]$variance)
+			$varianceAmount = Get-Random -Minimum 0.0 -Maximum ($variance + 0.0001)
+			if ((Get-Random -Maximum 2) -eq 0) {
+				return $baseValue - $varianceAmount
+			} else {
+				return $baseValue + $varianceAmount
+			}
+		}
+		
+		# Helper function: Clamp coordinates to screen bounds
+		function Set-CoordinateBounds {
+			param([ref]$x, [ref]$y)
+			$x.Value = [Math]::Max(0, [Math]::Min($x.Value, $script:ScreenWidth - 1))
+			$y.Value = [Math]::Max(0, [Math]::Min($y.Value, $script:ScreenHeight - 1))
+		}
+		
+		# ============================================
+		# UI Helper Functions
+		# ============================================
+		
 		# Helper function: Calculate padding needed to fill remaining width
 		function Get-Padding {
 			param(
@@ -2755,8 +3006,8 @@ namespace mJiggAPI {
 				[int]$x,
 				[int]$y,
 				[int]$width,
-				[string]$leftChar = [char]0x2502,
-				[string]$rightChar = [char]0x2502,
+				[string]$leftChar = "$($script:BoxVertical)",
+				[string]$rightChar = "$($script:BoxVertical)",
 				[string]$fillChar = " ",
 				[System.ConsoleColor]$borderColor = [System.ConsoleColor]::White,
 				[System.ConsoleColor]$fillColor = [System.ConsoleColor]::White
@@ -2776,22 +3027,38 @@ namespace mJiggAPI {
 				[int]$y,
 				[int]$width,
 				[string]$content = "",
-				[System.ConsoleColor]$contentColor = [System.ConsoleColor]::White
+				[System.ConsoleColor]$contentColor = [System.ConsoleColor]::White,
+				[System.ConsoleColor]$backgroundColor = $null
 			)
 			
 			[Console]::SetCursorPosition($x, $y)
-			Write-Host ([char]0x2502) -NoNewline
-			if ($content.Length -gt 0) {
-				Write-Host " " -NoNewline
-				Write-Host $content -NoNewline -ForegroundColor $contentColor
-				$usedWidth = 1 + 1 + $content.Length  # │ + space + content
-				$padding = Get-Padding -usedWidth ($usedWidth + 1) -totalWidth $width
-				Write-Host (" " * $padding) -NoNewline
+			if ($null -ne $backgroundColor) {
+				Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $backgroundColor
+				if ($content.Length -gt 0) {
+					Write-Host " " -NoNewline -BackgroundColor $backgroundColor
+					Write-Host $content -NoNewline -ForegroundColor $contentColor -BackgroundColor $backgroundColor
+					$usedWidth = 1 + 1 + $content.Length  # $($script:BoxVertical) + space + content
+					$padding = Get-Padding -usedWidth ($usedWidth + 1) -totalWidth $width
+					Write-Host (" " * $padding) -NoNewline -BackgroundColor $backgroundColor
+				} else {
+					# Empty line
+					Write-Host (" " * ($width - 2)) -NoNewline -BackgroundColor $backgroundColor
+				}
+				Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $backgroundColor
 			} else {
-				# Empty line
-				Write-Host (" " * ($width - 2)) -NoNewline
+				Write-Host "$($script:BoxVertical)" -NoNewline
+				if ($content.Length -gt 0) {
+					Write-Host " " -NoNewline
+					Write-Host $content -NoNewline -ForegroundColor $contentColor
+					$usedWidth = 1 + 1 + $content.Length  # $($script:BoxVertical) + space + content
+					$padding = Get-Padding -usedWidth ($usedWidth + 1) -totalWidth $width
+					Write-Host (" " * $padding) -NoNewline
+				} else {
+					# Empty line
+					Write-Host (" " * ($width - 2)) -NoNewline
+				}
+				Write-Host "$($script:BoxVertical)" -NoNewline
 			}
-			Write-Host ([char]0x2502) -NoNewline
 		}
 		
 		# Helper function: Draw a field row with input box (no description box)
@@ -2805,37 +3072,60 @@ namespace mJiggAPI {
 				[string]$fieldValue,
 				[int]$fieldWidth,
 				[int]$fieldIndex,
-				[int]$currentFieldIndex
+				[int]$currentFieldIndex,
+				[System.ConsoleColor]$backgroundColor = $null
 			)
 			
 			[Console]::SetCursorPosition($x, $y)
 			
 			# Calculate label padding for alignment
 			$labelPadding = [Math]::Max(0, $longestLabel - $label.Length)
-			$labelText = [char]0x2502 + "  " + $label + (" " * $labelPadding)
+			$labelText = "$($script:BoxVertical)  " + $label + (" " * $labelPadding)
 			
 			# Format field value
 			$fieldDisplay = if ([string]::IsNullOrEmpty($fieldValue)) { "" } else { $fieldValue }
 			$fieldDisplay = $fieldDisplay.PadRight($fieldWidth)
 			$fieldContent = "[" + $fieldDisplay + "]"
 			
-			# Write label
-			Write-Host $labelText -NoNewline
-			
-			# Write field (highlighted if current field)
-			if ($fieldIndex -eq $currentFieldIndex) {
-				Write-Host "[" -NoNewline
-				Write-Host $fieldDisplay -NoNewline -ForegroundColor Cyan -BackgroundColor DarkGray
-				Write-Host "]" -NoNewline
+			if ($null -ne $backgroundColor) {
+				# Write label with background
+				Write-Host $labelText -NoNewline -ForegroundColor $script:MoveDialogText -BackgroundColor $backgroundColor
+				
+				# Write field (highlighted if current field)
+				if ($fieldIndex -eq $currentFieldIndex) {
+					Write-Host "[" -NoNewline -ForegroundColor $script:MoveDialogText -BackgroundColor $backgroundColor
+					Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:MoveDialogFieldText -BackgroundColor $script:MoveDialogFieldBg
+					Write-Host "]" -NoNewline -ForegroundColor $script:MoveDialogText -BackgroundColor $backgroundColor
+				} else {
+					Write-Host "[" -NoNewline -ForegroundColor $script:MoveDialogText -BackgroundColor $backgroundColor
+					Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TextHighlight -BackgroundColor $backgroundColor
+					Write-Host "]" -NoNewline -ForegroundColor $script:MoveDialogText -BackgroundColor $backgroundColor
+				}
+				
+				# Calculate and write padding to fill remaining width
+				$usedWidth = $labelText.Length + $fieldContent.Length
+				$remainingPadding = Get-Padding -usedWidth ($usedWidth + 1) -totalWidth $width
+				Write-Host (" " * $remainingPadding) -NoNewline -BackgroundColor $backgroundColor
+				Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $backgroundColor
 			} else {
-				Write-Host $fieldContent -NoNewline -ForegroundColor Cyan
+				# Write label
+				Write-Host $labelText -NoNewline
+				
+				# Write field (highlighted if current field)
+				if ($fieldIndex -eq $currentFieldIndex) {
+					Write-Host "[" -NoNewline
+					Write-Host $fieldDisplay -NoNewline -ForegroundColor $script:TimeDialogFieldText -BackgroundColor $script:TimeDialogFieldBg
+					Write-Host "]" -NoNewline
+				} else {
+					Write-Host $fieldContent -NoNewline -ForegroundColor $script:TextHighlight
+				}
+				
+				# Calculate and write padding to fill remaining width
+				$usedWidth = $labelText.Length + $fieldContent.Length
+				$remainingPadding = Get-Padding -usedWidth ($usedWidth + 1) -totalWidth $width
+				Write-Host (" " * $remainingPadding) -NoNewline
+				Write-Host "$($script:BoxVertical)" -NoNewline
 			}
-			
-			# Calculate and write padding to fill remaining width
-			$usedWidth = $labelText.Length + $fieldContent.Length
-			$remainingPadding = Get-Padding -usedWidth ($usedWidth + 1) -totalWidth $width
-			Write-Host (" " * $remainingPadding) -NoNewline
-			Write-Host ([char]0x2502) -NoNewline
 		}
 		
 		function Show-MovementModifyDialog {
@@ -2888,7 +3178,7 @@ namespace mJiggAPI {
 			$label3 = [Math]::Max($label1, $label2)
 			$label4 = [Math]::Max($label3, "Speed (sec): ".Length)
 			$longestLabel = [Math]::Max($label4, "Delay (sec): ".Length)
-			$inputBoxStartX = 3 + $longestLabel  # pipe+2 spaces + longest label = X position where all input boxes start
+			$inputBoxStartX = 3 + $longestLabel  # "$($script:BoxVertical)  " + longest label = X position where all input boxes start
 			
 			# Draw dialog function - simplified (no description box)
 			$drawDialog = {
@@ -2914,110 +3204,114 @@ namespace mJiggAPI {
 					@{ Index = 6; Label = "Delay (sec): "; Value = $autoResumeDelaySec }
 				)
 				
-				# Clear dialog area
+				# Clear dialog area with themed background
 				for ($i = 0; $i -lt $height; $i++) {
 					[Console]::SetCursorPosition($x, $y + $i)
-					Write-Host (" " * $width) -NoNewline
+					Write-Host (" " * $width) -NoNewline -BackgroundColor $script:MoveDialogBg
 				}
 				
 				# Top border (spans full width)
 				[Console]::SetCursorPosition($x, $y)
-				Write-Host ([char]0x250C) -NoNewline
-				Write-Host ([string]::new([char]0x2500, ($width - 2))) -NoNewline
-				Write-Host ([char]0x2510) -NoNewline
+				Write-Host "$($script:BoxTopLeft)" -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $script:MoveDialogBg
+				Write-Host ("$($script:BoxHorizontal)" * ($width - 2)) -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $script:MoveDialogBg
+				Write-Host "$($script:BoxTopRight)" -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $script:MoveDialogBg
 				
 				# Title line
-				Write-SimpleDialogRow -x $x -y ($y + 1) -width $width -content "Modify Movement Settings" -contentColor Magenta
+				Write-SimpleDialogRow -x $x -y ($y + 1) -width $width -content "Modify Movement Settings" -contentColor $script:MoveDialogTitle -backgroundColor $script:MoveDialogBg
 				
 				# Empty line (row 2)
-				Write-SimpleDialogRow -x $x -y ($y + 2) -width $width
+				Write-SimpleDialogRow -x $x -y ($y + 2) -width $width -backgroundColor $script:MoveDialogBg
 				
 				# Interval section header (row 3)
-				Write-SimpleDialogRow -x $x -y ($y + 3) -width $width -content "Interval:" -contentColor Yellow
+				Write-SimpleDialogRow -x $x -y ($y + 3) -width $width -content "Interval:" -contentColor $script:MoveDialogSectionTitle -backgroundColor $script:MoveDialogBg
 				
 				# Interval fields (rows 4-5)
 				Write-SimpleFieldRow -x $x -y ($y + 4) -width $width `
 					-label $fields[0].Label -longestLabel $longestLabel -fieldValue $fields[0].Value `
-					-fieldWidth $fieldWidth -fieldIndex $fields[0].Index -currentFieldIndex $currentFieldIndex
+					-fieldWidth $fieldWidth -fieldIndex $fields[0].Index -currentFieldIndex $currentFieldIndex -backgroundColor $script:MoveDialogBg
 				
 				Write-SimpleFieldRow -x $x -y ($y + 5) -width $width `
 					-label $fields[1].Label -longestLabel $longestLabel -fieldValue $fields[1].Value `
-					-fieldWidth $fieldWidth -fieldIndex $fields[1].Index -currentFieldIndex $currentFieldIndex
+					-fieldWidth $fieldWidth -fieldIndex $fields[1].Index -currentFieldIndex $currentFieldIndex -backgroundColor $script:MoveDialogBg
 				
 				# Travel Distance section header (row 6)
-				Write-SimpleDialogRow -x $x -y ($y + 6) -width $width -content "Travel Distance:" -contentColor Yellow
+				Write-SimpleDialogRow -x $x -y ($y + 6) -width $width -content "Travel Distance:" -contentColor $script:MoveDialogSectionTitle -backgroundColor $script:MoveDialogBg
 				
 				# Travel Distance fields (rows 7-8)
 				Write-SimpleFieldRow -x $x -y ($y + 7) -width $width `
 					-label $fields[2].Label -longestLabel $longestLabel -fieldValue $fields[2].Value `
-					-fieldWidth $fieldWidth -fieldIndex $fields[2].Index -currentFieldIndex $currentFieldIndex
+					-fieldWidth $fieldWidth -fieldIndex $fields[2].Index -currentFieldIndex $currentFieldIndex -backgroundColor $script:MoveDialogBg
 				
 				Write-SimpleFieldRow -x $x -y ($y + 8) -width $width `
 					-label $fields[3].Label -longestLabel $longestLabel -fieldValue $fields[3].Value `
-					-fieldWidth $fieldWidth -fieldIndex $fields[3].Index -currentFieldIndex $currentFieldIndex
+					-fieldWidth $fieldWidth -fieldIndex $fields[3].Index -currentFieldIndex $currentFieldIndex -backgroundColor $script:MoveDialogBg
 				
 				# Movement Speed section header (row 9)
-				Write-SimpleDialogRow -x $x -y ($y + 9) -width $width -content "Movement Speed:" -contentColor Yellow
+				Write-SimpleDialogRow -x $x -y ($y + 9) -width $width -content "Movement Speed:" -contentColor $script:MoveDialogSectionTitle -backgroundColor $script:MoveDialogBg
 				
 				# Movement Speed fields (rows 10-11)
 				Write-SimpleFieldRow -x $x -y ($y + 10) -width $width `
 					-label $fields[4].Label -longestLabel $longestLabel -fieldValue $fields[4].Value `
-					-fieldWidth $fieldWidth -fieldIndex $fields[4].Index -currentFieldIndex $currentFieldIndex
+					-fieldWidth $fieldWidth -fieldIndex $fields[4].Index -currentFieldIndex $currentFieldIndex -backgroundColor $script:MoveDialogBg
 				
 				Write-SimpleFieldRow -x $x -y ($y + 11) -width $width `
 					-label $fields[5].Label -longestLabel $longestLabel -fieldValue $fields[5].Value `
-					-fieldWidth $fieldWidth -fieldIndex $fields[5].Index -currentFieldIndex $currentFieldIndex
+					-fieldWidth $fieldWidth -fieldIndex $fields[5].Index -currentFieldIndex $currentFieldIndex -backgroundColor $script:MoveDialogBg
 				
 				# Auto-Resume Delay section header (row 12)
-				Write-SimpleDialogRow -x $x -y ($y + 12) -width $width -content "Auto-Resume Delay:" -contentColor Yellow
+				Write-SimpleDialogRow -x $x -y ($y + 12) -width $width -content "Auto-Resume Delay:" -contentColor $script:MoveDialogSectionTitle -backgroundColor $script:MoveDialogBg
 				
 				# Auto-Resume Delay field (row 13)
 				Write-SimpleFieldRow -x $x -y ($y + 13) -width $width `
 					-label $fields[6].Label -longestLabel $longestLabel -fieldValue $fields[6].Value `
-					-fieldWidth $fieldWidth -fieldIndex $fields[6].Index -currentFieldIndex $currentFieldIndex
+					-fieldWidth $fieldWidth -fieldIndex $fields[6].Index -currentFieldIndex $currentFieldIndex -backgroundColor $script:MoveDialogBg
 				
 				# Empty line (row 14)
-				Write-SimpleDialogRow -x $x -y ($y + 14) -width $width
+				Write-SimpleDialogRow -x $x -y ($y + 14) -width $width -backgroundColor $script:MoveDialogBg
 				
 				# Error line (row 15)
 				if ($errorMsg) {
-					Write-SimpleDialogRow -x $x -y ($y + 15) -width $width -content $errorMsg -contentColor Red
+					Write-SimpleDialogRow -x $x -y ($y + 15) -width $width -content $errorMsg -contentColor $script:TextError -backgroundColor $script:MoveDialogBg
 				} else {
-					Write-SimpleDialogRow -x $x -y ($y + 15) -width $width
+					Write-SimpleDialogRow -x $x -y ($y + 15) -width $width -backgroundColor $script:MoveDialogBg
 				}
 				
 				# Bottom line with buttons (row 16)
-				$checkmark = [char]0x2705
-				$redX = [char]0x274C
+				$checkmark = [char]::ConvertFromUtf32(0x2705)
+				$redX = [char]::ConvertFromUtf32(0x274C)
 				[Console]::SetCursorPosition($x, $y + 16)
-				Write-Host ([char]0x2502) -NoNewline
-				Write-Host " " -NoNewline
-				Write-Host $checkmark -NoNewline -ForegroundColor Green
-				Write-Host "|" -NoNewline
-				Write-Host "(" -NoNewline
-				Write-Host "u" -NoNewline -ForegroundColor Yellow
-				Write-Host ")pdate  " -NoNewline
-				Write-Host $redX -NoNewline -ForegroundColor Red
-				Write-Host "|" -NoNewline
-				Write-Host "(" -NoNewline
-				Write-Host "c" -NoNewline -ForegroundColor Yellow
-				Write-Host ")ancel" -NoNewline
-				# Account for emojis: each emoji is 1 char in string but 2 display columns
-				$buttonText = $checkmark + "|(u)pdate  " + $redX + "|(c)ancel"
-				$buttonTextLength = $buttonText.Length + 2  # +2 because emojis count as 2 display chars but 1 string char each
-				$buttonUsedWidth = 1 + 1 + $buttonTextLength  # │ + space + button text
-				$buttonPadding = Get-Padding -usedWidth ($buttonUsedWidth + 1) -totalWidth $width
-				Write-Host (" " * $buttonPadding) -NoNewline
-				Write-Host ([char]0x2502) -NoNewline
+				Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $script:MoveDialogBg
+				Write-Host " " -NoNewline -BackgroundColor $script:MoveDialogBg
+				$checkmarkX = $x + 2
+				Write-Host $checkmark -NoNewline -ForegroundColor $script:TextSuccess -BackgroundColor $script:MoveDialogButtonBg
+				[Console]::SetCursorPosition($checkmarkX + 2, $y + 16)
+				Write-Host "|" -NoNewline -ForegroundColor $script:MoveDialogButtonText -BackgroundColor $script:MoveDialogButtonBg
+				Write-Host "(" -NoNewline -ForegroundColor $script:MoveDialogButtonText -BackgroundColor $script:MoveDialogButtonBg
+				Write-Host "u" -NoNewline -ForegroundColor $script:MoveDialogButtonHotkey -BackgroundColor $script:MoveDialogButtonBg
+				Write-Host ")pdate" -NoNewline -ForegroundColor $script:MoveDialogButtonText -BackgroundColor $script:MoveDialogButtonBg
+				Write-Host "  " -NoNewline -BackgroundColor $script:MoveDialogBg
+				$redXX = $Host.UI.RawUI.CursorPosition.X
+				Write-Host $redX -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:MoveDialogButtonBg
+				[Console]::SetCursorPosition($redXX + 2, $y + 16)
+				Write-Host "|" -NoNewline -ForegroundColor $script:MoveDialogButtonText -BackgroundColor $script:MoveDialogButtonBg
+				Write-Host "(" -NoNewline -ForegroundColor $script:MoveDialogButtonText -BackgroundColor $script:MoveDialogButtonBg
+				Write-Host "c" -NoNewline -ForegroundColor $script:MoveDialogButtonHotkey -BackgroundColor $script:MoveDialogButtonBg
+				Write-Host ")ancel" -NoNewline -ForegroundColor $script:MoveDialogButtonText -BackgroundColor $script:MoveDialogButtonBg
+				# Button line display width calculation:
+				# "$($script:BoxVertical) " (2) + checkmark (2) + "|" (1) + "(u)pdate" (8) + "  " (2) + redX (2) + "|" (1) + "(c)ancel" (8) = 26
+				# So we need: 30 - 26 - 1 = 3 spaces before closing $($script:BoxVertical)
+				$buttonPadding = 3
+				Write-Host (" " * $buttonPadding) -NoNewline -BackgroundColor $script:MoveDialogBg
+				Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $script:MoveDialogBg
 				
 				# Bottom border (spans full width)
 				[Console]::SetCursorPosition($x, $y + 17)
-				Write-Host ([char]0x2514) -NoNewline
-				Write-Host ([string]::new([char]0x2500, ($width - 2))) -NoNewline
-				Write-Host ([char]0x2518) -NoNewline
+				Write-Host "$($script:BoxBottomLeft)" -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $script:MoveDialogBg
+				Write-Host ("$($script:BoxHorizontal)" * ($width - 2)) -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $script:MoveDialogBg
+				Write-Host "$($script:BoxBottomRight)" -NoNewline -ForegroundColor $script:MoveDialogBorder -BackgroundColor $script:MoveDialogBg
 				
 				# Draw drop shadow
-				Draw-DialogShadow -dialogX $x -dialogY $y -dialogWidth $width -dialogHeight $height
+				Draw-DialogShadow -dialogX $x -dialogY $y -dialogWidth $width -dialogHeight $height -shadowColor $script:MoveDialogShadow
 			}
 			
 			# Initial draw
@@ -3026,7 +3320,7 @@ namespace mJiggAPI {
 			# Calculate button bounds for click detection
 			# Button row is at dialogY + 16 (row 16)
 			$buttonRowY = $dialogY + 16
-			# Update button: starts at dialogX + 2 (pipe+space = 2 chars), emoji (2 display chars) + pipe (1) = 5 chars
+			# Update button: starts at dialogX + 2 ("$($script:BoxVertical) " = 2 chars), emoji (2 display chars) + pipe (1) = 5 chars
 			# "(u)pdate  " = 10 chars, so update button spans from X+2 to X+14 (inclusive)
 			$updateButtonStartX = $dialogX + 2
 			$updateButtonEndX = $dialogX + 14  # 2 + 2 (emoji) + 1 (pipe) + 10 (text) - 1 (inclusive)
@@ -3762,9 +4056,13 @@ namespace mJiggAPI {
 							[Console]::CursorVisible = $false  # Hide cursor when field is cleared
 						}
 						$errorMessage = ""
-						& $drawDialog $dialogX $dialogY $dialogWidth $dialogHeight $currentField $errorMessage $inputBoxStartX $fieldWidth $intervalSecondsInput $intervalVarianceInput $moveSpeedInput $moveVarianceInput $travelDistanceInput $travelVarianceInput $autoResumeDelaySecondsInput
-						# Position cursor at end of input (must be after dialog draw)
-						$fieldYOffsets = @(4, 5, 7, 8, 10, 11, 13)  # Y offsets for each field relative to dialogY
+						# Optimized: only redraw current field instead of entire dialog
+						$fieldYOffsets = @(4, 5, 7, 8, 10, 11, 13)
+						$fieldLabels = @("Interval (sec): ", "Variance (sec): ", "Distance (px): ", "Variance (px): ", "Speed (sec): ", "Variance (sec): ", "Delay (sec): ")
+						Write-SimpleFieldRow -x $dialogX -y ($dialogY + $fieldYOffsets[$currentField]) -width $dialogWidth `
+							-label $fieldLabels[$currentField] -longestLabel $longestLabel -fieldValue $currentInputRef.Value `
+							-fieldWidth $fieldWidth -fieldIndex $currentField -currentFieldIndex $currentField -backgroundColor DarkBlue
+						# Position cursor at end of input
 						$fieldY = $dialogY + $fieldYOffsets[$currentField]
 						$cursorX = $dialogX + $inputBoxStartX + 1 + $currentInputRef.Value.Length
 						[Console]::SetCursorPosition($cursorX, $fieldY)
@@ -3781,15 +4079,15 @@ namespace mJiggAPI {
 						$currentInputRef.Value += $char.ToString()  # Convert char to string
 					}
 					$errorMessage = ""
-					& $drawDialog $dialogX $dialogY $dialogWidth $dialogHeight $currentField $errorMessage $inputBoxStartX $fieldWidth $intervalSecondsInput $intervalVarianceInput $moveSpeedInput $moveVarianceInput $travelDistanceInput $travelVarianceInput $autoResumeDelaySecondsInput
-					# Position cursor at end of input (must be after dialog draw)
-					# Calculate Y position based on field index (matches drawing positions)
-					$fieldYOffsets = @(4, 5, 7, 8, 10, 11, 13)  # Y offsets for each field relative to dialogY
+					# Optimized: only redraw current field instead of entire dialog
+					$fieldYOffsets = @(4, 5, 7, 8, 10, 11, 13)
+					$fieldLabels = @("Interval (sec): ", "Variance (sec): ", "Distance (px): ", "Variance (px): ", "Speed (sec): ", "Variance (sec): ", "Delay (sec): ")
+					Write-SimpleFieldRow -x $dialogX -y ($dialogY + $fieldYOffsets[$currentField]) -width $dialogWidth `
+						-label $fieldLabels[$currentField] -longestLabel $longestLabel -fieldValue $currentInputRef.Value `
+						-fieldWidth $fieldWidth -fieldIndex $currentField -currentFieldIndex $currentField -backgroundColor DarkBlue
+					# Position cursor at end of input
 					$fieldY = $dialogY + $fieldYOffsets[$currentField]
-					# Cursor X: dialogX + inputBoxStartX + 1 (for opening bracket) + length of actual value
-					# inputBoxStartX is relative to dialogX, so we need to add dialogX for absolute position
 					$cursorX = $dialogX + $inputBoxStartX + 1 + $currentInputRef.Value.Length
-					# Position cursor - use Console method directly for reliability
 					[Console]::SetCursorPosition($cursorX, $fieldY)
 				} elseif ($char -eq ".") {
 					# Decimal point for all fields - limit to 6 characters (including decimal point)
@@ -3803,26 +4101,39 @@ namespace mJiggAPI {
 						$currentInputRef.Value += "."  # Already a string
 					}
 					$errorMessage = ""
-					& $drawDialog $dialogX $dialogY $dialogWidth $dialogHeight $currentField $errorMessage $inputBoxStartX $fieldWidth $intervalSecondsInput $intervalVarianceInput $moveSpeedInput $moveVarianceInput $travelDistanceInput $travelVarianceInput $autoResumeDelaySecondsInput
-					# Position cursor at end of input after clearing (must be after dialog draw)
-					if ($isFirstChar) {
-						# Calculate Y position based on field index (matches drawing positions)
-						$fieldYOffsets = @(4, 5, 7, 8, 10, 11, 13)  # Y offsets for each field relative to dialogY
-						$fieldY = $dialogY + $fieldYOffsets[$currentField]
-						# Cursor X: dialogX + inputBoxStartX + 1 (for opening bracket) + length of actual value
-						# inputBoxStartX is relative to dialogX, so we need to add dialogX for absolute position
-						$cursorX = $dialogX + $inputBoxStartX + 1 + $currentInputRef.Value.Length
-						# Position cursor - use Console method directly for reliability
-						[Console]::SetCursorPosition($cursorX, $fieldY)
-					}
+					# Optimized: only redraw current field instead of entire dialog
+					$fieldYOffsets = @(4, 5, 7, 8, 10, 11, 13)
+					$fieldLabels = @("Interval (sec): ", "Variance (sec): ", "Distance (px): ", "Variance (px): ", "Speed (sec): ", "Variance (sec): ", "Delay (sec): ")
+					Write-SimpleFieldRow -x $dialogX -y ($dialogY + $fieldYOffsets[$currentField]) -width $dialogWidth `
+						-label $fieldLabels[$currentField] -longestLabel $longestLabel -fieldValue $currentInputRef.Value `
+						-fieldWidth $fieldWidth -fieldIndex $currentField -currentFieldIndex $currentField -backgroundColor DarkBlue
+					# Position cursor at end of input
+					$fieldY = $dialogY + $fieldYOffsets[$currentField]
+					$cursorX = $dialogX + $inputBoxStartX + 1 + $currentInputRef.Value.Length
+					[Console]::SetCursorPosition($cursorX, $fieldY)
 				} elseif ($key -eq "UpArrow" -or ($null -ne $keyInfo -and $keyInfo.VirtualKeyCode -eq 38)) {
 					# UpArrow - move to previous field (reverse tab)
+					$previousField = $currentField
 					$currentField = ($currentField - 1 + 7) % 7
 					$errorMessage = ""
 					$lastFieldWithInput = -1  # Reset input tracking when switching fields
-					& $drawDialog $dialogX $dialogY $dialogWidth $dialogHeight $currentField $errorMessage $inputBoxStartX $fieldWidth $intervalSecondsInput $intervalVarianceInput $moveSpeedInput $moveVarianceInput $travelDistanceInput $travelVarianceInput $autoResumeDelaySecondsInput
-					# Position cursor at the active field after arrow navigation
+					
+					# Optimized redraw: only update the two affected field rows instead of entire dialog
 					$fieldYOffsets = @(4, 5, 7, 8, 10, 11, 13)  # Y offsets for each field relative to dialogY
+					$fieldLabels = @("Interval (sec): ", "Variance (sec): ", "Distance (px): ", "Variance (px): ", "Speed (sec): ", "Variance (sec): ", "Delay (sec): ")
+					$fieldValues = @($intervalSecondsInput, $intervalVarianceInput, $travelDistanceInput, $travelVarianceInput, $moveSpeedInput, $moveVarianceInput, $autoResumeDelaySecondsInput)
+					
+					# Redraw previous field (unhighlight)
+					Write-SimpleFieldRow -x $dialogX -y ($dialogY + $fieldYOffsets[$previousField]) -width $dialogWidth `
+						-label $fieldLabels[$previousField] -longestLabel $longestLabel -fieldValue $fieldValues[$previousField] `
+						-fieldWidth $fieldWidth -fieldIndex $previousField -currentFieldIndex $currentField -backgroundColor DarkBlue
+					
+					# Redraw new field (highlight)
+					Write-SimpleFieldRow -x $dialogX -y ($dialogY + $fieldYOffsets[$currentField]) -width $dialogWidth `
+						-label $fieldLabels[$currentField] -longestLabel $longestLabel -fieldValue $fieldValues[$currentField] `
+						-fieldWidth $fieldWidth -fieldIndex $currentField -currentFieldIndex $currentField -backgroundColor DarkBlue
+					
+					# Position cursor at the active field after arrow navigation
 					$fieldY = $dialogY + $fieldYOffsets[$currentField]
 					$currentInputRef = switch ($currentField) {
 						0 { [ref]$intervalSecondsInput }
@@ -3837,12 +4148,27 @@ namespace mJiggAPI {
 					[Console]::SetCursorPosition($cursorX, $fieldY)
 				} elseif ($key -eq "DownArrow" -or ($null -ne $keyInfo -and $keyInfo.VirtualKeyCode -eq 40)) {
 					# DownArrow - move to next field (forward tab)
+					$previousField = $currentField
 					$currentField = ($currentField + 1) % 7
 					$errorMessage = ""
 					$lastFieldWithInput = -1  # Reset input tracking when switching fields
-					& $drawDialog $dialogX $dialogY $dialogWidth $dialogHeight $currentField $errorMessage $inputBoxStartX $fieldWidth $intervalSecondsInput $intervalVarianceInput $moveSpeedInput $moveVarianceInput $travelDistanceInput $travelVarianceInput $autoResumeDelaySecondsInput
-					# Position cursor at the active field after arrow navigation
+					
+					# Optimized redraw: only update the two affected field rows instead of entire dialog
 					$fieldYOffsets = @(4, 5, 7, 8, 10, 11, 13)  # Y offsets for each field relative to dialogY
+					$fieldLabels = @("Interval (sec): ", "Variance (sec): ", "Distance (px): ", "Variance (px): ", "Speed (sec): ", "Variance (sec): ", "Delay (sec): ")
+					$fieldValues = @($intervalSecondsInput, $intervalVarianceInput, $travelDistanceInput, $travelVarianceInput, $moveSpeedInput, $moveVarianceInput, $autoResumeDelaySecondsInput)
+					
+					# Redraw previous field (unhighlight)
+					Write-SimpleFieldRow -x $dialogX -y ($dialogY + $fieldYOffsets[$previousField]) -width $dialogWidth `
+						-label $fieldLabels[$previousField] -longestLabel $longestLabel -fieldValue $fieldValues[$previousField] `
+						-fieldWidth $fieldWidth -fieldIndex $previousField -currentFieldIndex $currentField -backgroundColor DarkBlue
+					
+					# Redraw new field (highlight)
+					Write-SimpleFieldRow -x $dialogX -y ($dialogY + $fieldYOffsets[$currentField]) -width $dialogWidth `
+						-label $fieldLabels[$currentField] -longestLabel $longestLabel -fieldValue $fieldValues[$currentField] `
+						-fieldWidth $fieldWidth -fieldIndex $currentField -currentFieldIndex $currentField -backgroundColor DarkBlue
+					
+					# Position cursor at the active field after arrow navigation
 					$fieldY = $dialogY + $fieldYOffsets[$currentField]
 					$currentInputRef = switch ($currentField) {
 						0 { [ref]$intervalSecondsInput }
@@ -3922,7 +4248,7 @@ namespace mJiggAPI {
 			
 			# Dialog dimensions (same as time change dialog)
 			$dialogWidth = 35
-			$dialogHeight = 8
+			$dialogHeight = 7
 			$dialogX = [math]::Max(0, [math]::Floor(($currentHostWidth - $dialogWidth) / 2))
 			$dialogY = [math]::Max(0, [math]::Floor(($currentHostHeight - $dialogHeight) / 2))
 			
@@ -3932,30 +4258,27 @@ namespace mJiggAPI {
 			
 			# Draw dialog box (exactly 35 characters per line)
 			# Calculate spacing for bottom line (emojis display as 2 chars each but count as 1 in string length)
-			$checkmark = [char]0x2705  # ✅ green checkmark
-			$redX = [char]0x274C  # ❌ red X
-			$bottomLineContent = [char]0x2502 + "  " + $checkmark + "|(y)es  " + $redX + "|(n)o"
-			# Account for emojis: each emoji is 1 char in string but 2 display columns
-			# String length: pipe+2 spaces (3) + emoji (1) + "|" (1) + "(y)es  " (7) + emoji (1) + "|" (1) + "(n)o" (4) = 18
-			# Display width: pipe+2 spaces (3) + emoji (2) + "|" (1) + "(y)es  " (7) + emoji (2) + "|" (1) + "(n)o" (4) = 20
-			# So we need: 35 - 20 - 1 = 14 spaces before closing pipe
-			$bottomLineTextLength = $bottomLineContent.Length + 2  # +2 because emojis count as 2 display chars but 1 string char each
-			$bottomLinePadding = Get-Padding -usedWidth ($bottomLineTextLength + 1) -totalWidth $dialogWidth
+			$checkmark = [char]::ConvertFromUtf32(0x2705)  # ✅ green checkmark
+			$redX = [char]::ConvertFromUtf32(0x274C)  # ❌ red X
+			# Button line display width calculation:
+			# "$($script:BoxVertical) " (2) + checkmark (2) + "|" (1) + "(y)es" (5) + "  " (2) + redX (2) + "|" (1) + "(n)o" (4) = 19
+			# So we need: 35 - 19 - 1 = 15 spaces before closing $($script:BoxVertical)
+			$bottomLinePadding = 15
 			
 			# Build all lines to be exactly 35 characters using Get-Padding helper
-			$line0 = [char]0x250C + [string]::new([char]0x2500, 33) + [char]0x2510  # 35 chars
-			$line1Text = [char]0x2502 + "  Confirm Quit"
+			$line0 = "$($script:BoxTopLeft)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxTopRight)"  # 35 chars
+			$line1Text = "$($script:BoxVertical)  Confirm Quit"
 			$line1Padding = Get-Padding -usedWidth ($line1Text.Length + 1) -totalWidth $dialogWidth
-			$line1 = $line1Text + (" " * $line1Padding) + [char]0x2502
+			$line1 = $line1Text + (" " * $line1Padding) + "$($script:BoxVertical)"
 			
-			$line2 = [char]0x2502 + (" " * 33) + [char]0x2502  # 35 chars
+			$line2 = "$($script:BoxVertical)" + (" " * 33) + "$($script:BoxVertical)"  # 35 chars
 			
-			$line3Text = [char]0x2502 + "  Are you sure you want to quit?"
+			$line3Text = "$($script:BoxVertical)  Are you sure you want to quit?"
 			$line3Padding = Get-Padding -usedWidth ($line3Text.Length + 1) -totalWidth $dialogWidth
-			$line3 = $line3Text + (" " * $line3Padding) + [char]0x2502
+			$line3 = $line3Text + (" " * $line3Padding) + "$($script:BoxVertical)"
 			
-			$line4 = [char]0x2502 + (" " * 33) + [char]0x2502  # 35 chars
-			$line5 = [char]0x2502 + (" " * 33) + [char]0x2502  # 35 chars
+			$line4 = "$($script:BoxVertical)" + (" " * 33) + "$($script:BoxVertical)"  # 35 chars
+			$line5 = "$($script:BoxVertical)" + (" " * 33) + "$($script:BoxVertical)"  # 35 chars
 			
 			$dialogLines = @(
 				$line0,
@@ -3965,52 +4288,57 @@ namespace mJiggAPI {
 				$line4,
 				$line5,
 				$null,  # Bottom line will be written separately with colors
-				[char]0x2514 + [string]::new([char]0x2500, 33) + [char]0x2518  # 35 chars
+				"$($script:BoxBottomLeft)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxBottomRight)"  # 35 chars
 			)
 			
-			# Draw dialog background (clear area)
+			# Draw dialog background (clear area) with magenta background
 			for ($i = 0; $i -lt $dialogHeight; $i++) {
 				[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-				Write-Host (" " * $dialogWidth) -NoNewline
+				Write-Host (" " * $dialogWidth) -NoNewline -BackgroundColor DarkMagenta
 			}
 			
-			# Draw dialog box
+			# Draw dialog box with themed background
 			for ($i = 0; $i -lt $dialogLines.Count; $i++) {
 				if ($i -eq 1) {
-					# Title line - write in magenta
+					# Title line
 					[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-					Write-Host ([char]0x2502 + "  ") -NoNewline
-					Write-Host "Confirm Quit" -NoNewline -ForegroundColor Magenta
-					$titleUsedWidth = 3 + "Confirm Quit".Length  # pipe+2 spaces + title
+					Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:QuitDialogBorder -BackgroundColor $script:QuitDialogBg
+					Write-Host "Confirm Quit" -NoNewline -ForegroundColor $script:QuitDialogTitle -BackgroundColor $script:QuitDialogBg
+					$titleUsedWidth = 3 + "Confirm Quit".Length  # "$($script:BoxVertical)  " + title
 					$titlePadding = Get-Padding -usedWidth ($titleUsedWidth + 1) -totalWidth $dialogWidth
-					Write-Host (" " * $titlePadding) -NoNewline
-					Write-Host ([char]0x2502) -NoNewline
+					Write-Host (" " * $titlePadding) -NoNewline -BackgroundColor $script:QuitDialogBg
+					Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:QuitDialogBorder -BackgroundColor $script:QuitDialogBg
 				} elseif ($i -eq 6) {
 					# Bottom line - write with colored icons and hotkey letters
 					[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-					Write-Host ([char]0x2502 + "  ") -NoNewline
-					Write-Host $checkmark -NoNewline -ForegroundColor Green
-					Write-Host "|" -NoNewline
+					Write-Host "$($script:BoxVertical) " -NoNewline -ForegroundColor $script:QuitDialogBorder -BackgroundColor $script:QuitDialogBg
+					$checkmarkX = $dialogX + 2
+					Write-Host $checkmark -NoNewline -ForegroundColor $script:TextSuccess -BackgroundColor $script:QuitDialogButtonBg
+					[Console]::SetCursorPosition($checkmarkX + 2, $dialogY + $i)
+					Write-Host "|" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
 					# Parse "(y)es" - parentheses white, letter yellow, text white
-					Write-Host "(" -NoNewline
-					Write-Host "y" -NoNewline -ForegroundColor Yellow
-					Write-Host ")es  " -NoNewline
-					Write-Host $redX -NoNewline -ForegroundColor Red
-					Write-Host "|" -NoNewline
+					Write-Host "(" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
+					Write-Host "y" -NoNewline -ForegroundColor $script:QuitDialogButtonHotkey -BackgroundColor $script:QuitDialogButtonBg
+					Write-Host ")es" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
+					Write-Host "  " -NoNewline -BackgroundColor $script:QuitDialogBg
+					$redXX = $Host.UI.RawUI.CursorPosition.X
+					Write-Host $redX -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:QuitDialogButtonBg
+					[Console]::SetCursorPosition($redXX + 2, $dialogY + $i)
+					Write-Host "|" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
 					# Parse "(n)o" - parentheses white, letter yellow, text white
-					Write-Host "(" -NoNewline
-					Write-Host "n" -NoNewline -ForegroundColor Yellow
-					Write-Host ")o" -NoNewline
-					Write-Host (" " * $bottomLinePadding) -NoNewline
-					Write-Host ([char]0x2502) -NoNewline
+					Write-Host "(" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
+					Write-Host "n" -NoNewline -ForegroundColor $script:QuitDialogButtonHotkey -BackgroundColor $script:QuitDialogButtonBg
+					Write-Host ")o" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
+					Write-Host (" " * $bottomLinePadding) -NoNewline -BackgroundColor $script:QuitDialogBg
+					Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:QuitDialogBorder -BackgroundColor $script:QuitDialogBg
 				} else {
 					[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-					Write-Host $dialogLines[$i] -NoNewline
+					Write-Host $dialogLines[$i] -NoNewline -ForegroundColor $script:QuitDialogText -BackgroundColor $script:QuitDialogBg
 				}
 			}
 			
 			# Draw drop shadow
-			Draw-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight
+			Draw-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight -shadowColor $script:QuitDialogShadow
 			
 			# Get input
 			$result = $null
@@ -4034,44 +4362,49 @@ namespace mJiggAPI {
 					$dialogX = [math]::Max(0, [math]::Floor(($currentHostWidth - $dialogWidth) / 2))
 					$dialogY = [math]::Max(0, [math]::Floor(($currentHostHeight - $dialogHeight) / 2))
 					
-					# Clear screen and redraw dialog
+					# Clear screen and redraw dialog with themed background
 					Clear-Host
 					for ($i = 0; $i -lt $dialogLines.Count; $i++) {
 						if ($i -eq 1) {
-							# Title line - write in magenta
+							# Title line
 							[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-							Write-Host ([char]0x2502 + "  ") -NoNewline
-							Write-Host "Confirm Quit" -NoNewline -ForegroundColor Magenta
-							$titleUsedWidth = 3 + "Confirm Quit".Length  # pipe+2 spaces + title
+							Write-Host "$($script:BoxVertical)  " -NoNewline -ForegroundColor $script:QuitDialogBorder -BackgroundColor $script:QuitDialogBg
+							Write-Host "Confirm Quit" -NoNewline -ForegroundColor $script:QuitDialogTitle -BackgroundColor $script:QuitDialogBg
+							$titleUsedWidth = 3 + "Confirm Quit".Length  # "$($script:BoxVertical)  " + title
 							$titlePadding = Get-Padding -usedWidth ($titleUsedWidth + 1) -totalWidth $dialogWidth
-							Write-Host (" " * $titlePadding) -NoNewline
-							Write-Host ([char]0x2502) -NoNewline
+							Write-Host (" " * $titlePadding) -NoNewline -BackgroundColor $script:QuitDialogBg
+							Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:QuitDialogBorder -BackgroundColor $script:QuitDialogBg
 						} elseif ($i -eq 6) {
 							# Bottom line - write with colored icons and hotkey letters
 							[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-							Write-Host ([char]0x2502 + "  ") -NoNewline
-							Write-Host $checkmark -NoNewline -ForegroundColor Green
-							Write-Host "|" -NoNewline
+							Write-Host "$($script:BoxVertical) " -NoNewline -ForegroundColor $script:QuitDialogBorder -BackgroundColor $script:QuitDialogBg
+							$checkmarkX = $dialogX + 2
+							Write-Host $checkmark -NoNewline -ForegroundColor $script:TextSuccess -BackgroundColor $script:QuitDialogButtonBg
+							[Console]::SetCursorPosition($checkmarkX + 2, $dialogY + $i)
+							Write-Host "|" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
 							# Parse "(y)es" - parentheses white, letter yellow, text white
-							Write-Host "(" -NoNewline
-							Write-Host "y" -NoNewline -ForegroundColor Yellow
-							Write-Host ")es  " -NoNewline
-							Write-Host $redX -NoNewline -ForegroundColor Red
-							Write-Host "|" -NoNewline
+							Write-Host "(" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
+							Write-Host "y" -NoNewline -ForegroundColor $script:QuitDialogButtonHotkey -BackgroundColor $script:QuitDialogButtonBg
+							Write-Host ")es" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
+							Write-Host "  " -NoNewline -BackgroundColor $script:QuitDialogBg
+							$redXX = $Host.UI.RawUI.CursorPosition.X
+							Write-Host $redX -NoNewline -ForegroundColor $script:TextError -BackgroundColor $script:QuitDialogButtonBg
+							[Console]::SetCursorPosition($redXX + 2, $dialogY + $i)
+							Write-Host "|" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
 							# Parse "(n)o" - parentheses white, letter yellow, text white
-							Write-Host "(" -NoNewline
-							Write-Host "n" -NoNewline -ForegroundColor Yellow
-							Write-Host ")o" -NoNewline
-							Write-Host (" " * $bottomLinePadding) -NoNewline
-							Write-Host ([char]0x2502) -NoNewline
+							Write-Host "(" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
+							Write-Host "n" -NoNewline -ForegroundColor $script:QuitDialogButtonHotkey -BackgroundColor $script:QuitDialogButtonBg
+							Write-Host ")o" -NoNewline -ForegroundColor $script:QuitDialogButtonText -BackgroundColor $script:QuitDialogButtonBg
+							Write-Host (" " * $bottomLinePadding) -NoNewline -BackgroundColor $script:QuitDialogBg
+							Write-Host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:QuitDialogBorder -BackgroundColor $script:QuitDialogBg
 						} else {
 							[Console]::SetCursorPosition($dialogX, $dialogY + $i)
-							Write-Host $dialogLines[$i] -NoNewline
+							Write-Host $dialogLines[$i] -NoNewline -ForegroundColor $script:QuitDialogText -BackgroundColor $script:QuitDialogBg
 						}
 					}
 					
 					# Draw drop shadow
-					Draw-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight
+					Draw-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight -shadowColor $script:QuitDialogShadow
 				}
 				
 				# Check for dialog button clicks detected by main loop
@@ -4202,8 +4535,11 @@ namespace mJiggAPI {
 		}
 
 		# Initialization complete - pause to read debug output if in debug mode
+		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 4: Before debug mode check (DebugMode=$DebugMode)" | Out-File $script:StartupDiagFile -Append }
+		
 		if ($DebugMode) {
-			Write-Host "`nPress any key to start mJig..." -ForegroundColor Yellow
+			if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - ENTERED DEBUG MODE KEY WAIT LOOP" | Out-File $script:StartupDiagFile -Append }
+			Write-Host "`nPress any key to start mJig..." -ForegroundColor $script:TextWarning
 			
 			$keyPressed = $false
 			
@@ -4273,20 +4609,16 @@ namespace mJiggAPI {
 			# Clear-Host is called later when the main loop starts rendering
 		}
 
-		# Clear any keys that might be in the input buffer from before script started
-		# This prevents the script from getting stuck on startup
-		try {
-			while ($Host.UI.RawUI.KeyAvailable) {
-				$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown,AllowCtrlC")
-			}
-		} catch {
-			# Silently ignore - buffer might not be in a readable state
-		}
+		# Note: Previously had code here to clear key buffer, but $Host.UI.RawUI.KeyAvailable 
+		# can return false positives and ReadKey blocks waiting for input, causing startup freeze.
+		# The main loop handles stale input gracefully, so pre-clearing is not necessary.
+		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 5: Skipping key buffer clear (causes blocking)" | Out-File $script:StartupDiagFile -Append }
+		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 6: Entering main loop" | Out-File $script:StartupDiagFile -Append }
 
 		# Main Processing Loop
 		:process while ($true) {
-			{  # process body - do not close until break below
-			{
+			$script:LoopIteration++
+			
 			# Reset state for this iteration
 			$time = $false
 			$script:userInputDetected = $false
@@ -4298,7 +4630,7 @@ namespace mJiggAPI {
 			$interval = 0
 			$math = 0
 			$date = Get-Date
-			$currentTime = Get-Date -Format "HHmm"
+			$currentTime = $date.ToString("HHmm")
 			$forceRedraw = $false
 			$automatedMovementPos = $null  # Track position after automated movement
 			$directionArrow = ""  # Track direction arrow for log display
@@ -4309,21 +4641,10 @@ namespace mJiggAPI {
 			# Calculate interval and wait BEFORE doing movement (skip on first run or if forceRedraw)
 			if ($null -ne $LastMovementTime -and -not $forceRedraw) {
 				# Calculate random interval with variance
-				# Variance can be any number, even larger than base interval
-				# Convert to milliseconds for calculation, then back to seconds for display
+				# Convert to milliseconds for calculation
 				$intervalSecondsMs = $script:IntervalSeconds * 1000
 				$intervalVarianceMs = $script:IntervalVariance * 1000
-				
-				# Get-Random -Maximum returns 0 to (max-1), so we need to add 1 to get 0 to max
-				$varianceAmountMs = Get-Random -Minimum 0 -Maximum ($intervalVarianceMs + 1)
-				$ras = Get-Random -Maximum 2 -Minimum 0
-				if ($ras -eq 0) {
-					# Subtract variance
-					$intervalMs = ($intervalSecondsMs - $varianceAmountMs)
-				} else {
-					# Add variance
-					$intervalMs = ($intervalSecondsMs + $varianceAmountMs) 
-				}
+				$intervalMs = Get-ValueWithVariance -baseValue $intervalSecondsMs -variance $intervalVarianceMs
 				
 				# Subtract the previous movement duration from the interval
 				$intervalMs = $intervalMs - $LastMovementDurationMs
@@ -4342,39 +4663,19 @@ namespace mJiggAPI {
 				$math = [math]::Max(1, [math]::Floor($intervalMs / 50))
 				
 				$waitExecuted = $true
-				# Use direct Windows API call for better performance (avoids .NET stutter)
-				$point = New-Object mJiggAPI.POINT
-				$hasGetCursorPos = [mJiggAPI.Mouse].GetMethod("GetCursorPos") -ne $null
-				if ($hasGetCursorPos) {
-					if ([mJiggAPI.Mouse]::GetCursorPos([ref]$point)) {
-						# Convert POINT to System.Drawing.Point for compatibility
-						$mousePosAtStart = New-Object System.Drawing.Point($point.X, $point.Y)
-					} else {
-						# API call failed - skip this check
-						$mousePosAtStart = $null
-					}
-				} else {
-					# Method not available - skip this check
-					$mousePosAtStart = $null
-				}
+				$mousePosAtStart = Get-MousePosition
 				
 				# Wait Loop - Check window/buffer size changes, menu hotkeys, and keyboard input
 				# Menu hotkeys checked every 200ms (every 4th iteration), keyboard input checked every 50ms for maximum reliability
 				$x = 0
 				:waitLoop while ($true) {
-					{
 					$x++
 					
 					# Check for system-wide keyboard input every 50ms for maximum reliability
 					# Skip checking if we recently sent a simulated key press (within last 300ms)
-					$shouldCheckKeyboard = $true
-					if ($null -ne $LastSimulatedKeyPress) {
-						$timeSinceSimulatedKey = ((Get-Date) - $LastSimulatedKeyPress).TotalMilliseconds
-						if ($timeSinceSimulatedKey -lt 300) {
-							$shouldCheckKeyboard = $false
-						} else {
-							$LastSimulatedKeyPress = $null
-						}
+					$shouldCheckKeyboard = (Get-TimeSinceMs -startTime $LastSimulatedKeyPress) -ge 300
+					if ($shouldCheckKeyboard) {
+						$LastSimulatedKeyPress = $null
 					}
 					
 					if ($shouldCheckKeyboard) {
@@ -4389,21 +4690,13 @@ namespace mJiggAPI {
 							$script:lastMousePosCheck = $null
 						}
 						try {
-							$checkPoint = New-Object mJiggAPI.POINT
-							$hasGetCursorPos = [mJiggAPI.Mouse].GetMethod("GetCursorPos") -ne $null
-							if ($hasGetCursorPos -and [mJiggAPI.Mouse]::GetCursorPos([ref]$checkPoint)) {
-								$currentCheckPos = New-Object System.Drawing.Point($checkPoint.X, $checkPoint.Y)
-								if ($null -ne $script:lastMousePosCheck) {
-									# Check if mouse moved more than 2 pixels
-									$deltaX = [Math]::Abs($currentCheckPos.X - $script:lastMousePosCheck.X)
-									$deltaY = [Math]::Abs($currentCheckPos.Y - $script:lastMousePosCheck.Y)
-									if ($deltaX -gt 2 -or $deltaY -gt 2) {
-										# Mouse is moving - set flag to skip console updates
-										$script:LastMouseMovementTime = Get-Date
-										$mouseInputDetected = $true
-										if ($script:AutoResumeDelaySeconds -gt 0) {
-											$LastUserInputTime = Get-Date
-										}
+							$currentCheckPos = Get-MousePosition
+							if ($null -ne $currentCheckPos) {
+								if (Test-MouseMoved -currentPos $currentCheckPos -lastPos $script:lastMousePosCheck -threshold 2) {
+									$script:LastMouseMovementTime = Get-Date
+									$mouseInputDetected = $true
+									if ($script:AutoResumeDelaySeconds -gt 0) {
+										$LastUserInputTime = Get-Date
 									}
 								}
 								$script:lastMousePosCheck = $currentCheckPos
@@ -4412,8 +4705,12 @@ namespace mJiggAPI {
 							# Ignore errors in mouse position checking
 						}
 						
-						# Track all pressed keys for display (only when Output is "full")
-						if ($Output -eq "full") {
+						# Skip expensive keyboard scanning if mouse is actively moving
+						# This prevents stutter by avoiding GetAsyncKeyState calls during mouse movement
+						$mouseRecentlyMoving = ($null -ne $script:LastMouseMovementTime) -and ((Get-TimeSinceMs -startTime $script:LastMouseMovementTime) -lt 200)
+						
+						# Track all pressed keys for display (only when Output is "full" and mouse not moving)
+						if ($Output -eq "full" -and -not $mouseRecentlyMoving) {
 							for ($keyCode = 0; $keyCode -le 255; $keyCode++) {
 								if ($keyCode -eq 0xA5) { continue }  # Skip Right Alt
 								$currentKeyState = [mJiggAPI.Keyboard]::GetAsyncKeyState($keyCode)
@@ -4434,6 +4731,14 @@ namespace mJiggAPI {
 						}
 						
 						# Check for key press transitions (for user input detection)
+						# Skip if mouse is actively moving to prevent stutter
+						if ($mouseRecentlyMoving) {
+							# Still check for sleep key presses, but skip the expensive full scan
+							Start-Sleep -Milliseconds 50
+							if ($x -ge $math) { break waitLoop }
+							continue
+						}
+						
 						for ($keyCode = 0; $keyCode -le 255; $keyCode++) {
 							if ($keyCode -eq 0xA5) { continue }  # Skip Right Alt
 							
@@ -4447,23 +4752,31 @@ namespace mJiggAPI {
 								$wasPreviouslyPressed = if ($script:previousKeyStates.ContainsKey($keyCode)) { $script:previousKeyStates[$keyCode] } else { $false }
 								
 								if ($wasJustPressed -or ($isCurrentlyPressed -and -not $wasPreviouslyPressed)) {
-									# Handle left mouse button clicks (for menu/dialog interaction)
-									if ($keyCode -eq 0x01) {
-										# Left mouse button clicked - check if it's on a menu item or dialog button
-										# IMPORTANT: Click detection and actions happen IMMEDIATELY, regardless of mouse movement delay
-										# Only the logging is delayed to prevent console stutter
+									# Left mouse button clicked - check if it's on a menu item or dialog button
+									# Debounce: Only log clicks if we haven't logged one in the last 300ms
+									# Also check if mouse is currently moving - if so, skip logging entirely
+									$shouldLogClick = $true
+									if ($DebugMode) {
+										# Check debounce timer
+										if ($null -ne $script:LastClickLogTime) {
+											$timeSinceLastClickLog = Get-TimeSinceMs -startTime $script:LastClickLogTime
+											if ($timeSinceLastClickLog -lt 300) {
+												$shouldLogClick = $false
+											}
+										}
 										
-										# Click detection happens ALWAYS (not just in DebugMode)
-										# Initialize variables for click detection
-										$gotCursorPos = $false
-										$mousePoint = $null
-										$consoleHandle = [IntPtr]::Zero
-										$isConsoleFocused = $false
-										$consoleX = -1
-										$consoleY = -1
-										$clickedButton = "none"
-										
-										# Collect debug information (only if DebugMode)
+										# Check if mouse is currently moving - if so, don't log at all
+										if ($null -ne $script:LastMouseMovementTime) {
+											$timeSinceMouseMovement = Get-TimeSinceMs -startTime $script:LastMouseMovementTime
+											# Don't log if mouse moved within last 200ms
+											if ($timeSinceMouseMovement -lt 200) {
+												$shouldLogClick = $false
+											}
+										}
+									}
+									
+									if ($shouldLogClick) {
+										# Collect all debug information first, then log it all at once
 										$debugInfo = @{
 											focus = "unknown"
 											screenX = "unknown"
@@ -4473,121 +4786,115 @@ namespace mJiggAPI {
 											button = "none"
 										}
 										
-										try {
-										# Get mouse position in screen coordinates (always needed for click detection)
-										$hasGetCursorPos = [mJiggAPI.Mouse].GetMethod("GetCursorPos") -ne $null
-										if ($hasGetCursorPos) {
-											$mousePoint = New-Object mJiggAPI.POINT
-											$gotCursorPos = [mJiggAPI.Mouse]::GetCursorPos([ref]$mousePoint)
-											if ($gotCursorPos -and $DebugMode) {
-												$debugInfo.screenX = $mousePoint.X
-												$debugInfo.screenY = $mousePoint.Y
-											}
-										}
-												
-										# Get console window handle (always needed for click detection)
-										$hasGetConsoleWindow = [mJiggAPI.Mouse].GetMethod("GetConsoleWindow") -ne $null
-										if ($hasGetConsoleWindow) {
+										if ($DebugMode) {
 											try {
-												$consoleHandle = [mJiggAPI.Mouse]::GetConsoleWindow()
-											} catch {
-												# Method exists but call failed
-												$consoleHandle = [IntPtr]::Zero
-											}
-										}
-										
-										if ($consoleHandle -eq [IntPtr]::Zero) {
-											# Console handle is zero - this can happen in Windows Terminal or other modern terminal emulators
-											# Try alternative method to get console window
-											try {
-												# Try using Get-Process to find the console window
-												$currentProcess = Get-Process -Id $PID
-												$mainWindowHandle = $currentProcess.MainWindowHandle
-												if ($mainWindowHandle -ne [IntPtr]::Zero) {
-													$consoleHandle = $mainWindowHandle
+												# Get mouse position in screen coordinates (using cached helper)
+												$mousePos = Get-MousePosition
+												if ($null -ne $mousePos) {
+													$debugInfo.screenX = $mousePos.X
+													$debugInfo.screenY = $mousePos.Y
 												}
-											} catch {
-												# Alternative method also failed
-											}
-										}
-										
-										if ($consoleHandle -ne [IntPtr]::Zero) {
-											# Check if console window is in focus (always needed for click detection)
-											$isConsoleFocused = $false
-											try {
-												$foregroundWindow = [mJiggAPI.Mouse]::GetForegroundWindow()
 												
-												# First check: Does foreground window match our console handle?
-												$isConsoleFocused = ($foregroundWindow -eq $consoleHandle)
+												# Get console window handle
+												$consoleHandle = [IntPtr]::Zero
+												$hasGetConsoleWindow = [mJiggAPI.Mouse].GetMethod("GetConsoleWindow") -ne $null
+												if ($hasGetConsoleWindow) {
+													try {
+														$consoleHandle = [mJiggAPI.Mouse]::GetConsoleWindow()
+													} catch {
+														# Method exists but call failed
+														$consoleHandle = [IntPtr]::Zero
+													}
+												}
 												
-												# If not, check if foreground window belongs to our process or parent process
-												if (-not $isConsoleFocused) {
-													$hasGetWindowThreadProcessId = [mJiggAPI.Mouse].GetMethod("GetWindowThreadProcessId") -ne $null
-													if ($hasGetWindowThreadProcessId) {
-														$fgProcessId = 0
-														[mJiggAPI.Mouse]::GetWindowThreadProcessId($foregroundWindow, [ref]$fgProcessId) | Out-Null
+												if ($consoleHandle -eq [IntPtr]::Zero) {
+													# Console handle is zero - this can happen in Windows Terminal or other modern terminal emulators
+													# Try alternative method to get console window
+													try {
+														# Try using Get-Process to find the console window
+														$currentProcess = Get-Process -Id $PID
+														$mainWindowHandle = $currentProcess.MainWindowHandle
+														if ($mainWindowHandle -ne [IntPtr]::Zero) {
+															$consoleHandle = $mainWindowHandle
+														}
+													} catch {
+														# Alternative method also failed
+													}
+												}
+												
+												if ($consoleHandle -ne [IntPtr]::Zero) {
+													# Check if console window is in focus
+													$isConsoleFocused = $false
+													try {
+														$foregroundWindow = [mJiggAPI.Mouse]::GetForegroundWindow()
 														
-														# Check if foreground window belongs to our process
-														if ($fgProcessId -eq $PID) {
-															# Foreground window belongs to our process - use it as the console handle
-															$consoleHandle = $foregroundWindow
-															$isConsoleFocused = $true
-														} else {
-															# Check if foreground window belongs to parent process (Windows Terminal)
-															try {
-																$currentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
-																if ($null -ne $currentProcess -and $null -ne $currentProcess.Parent -and $fgProcessId -eq $currentProcess.Parent.Id) {
-																	# Foreground window belongs to parent - use it as the console handle
+														# First check: Does foreground window match our console handle?
+														$isConsoleFocused = ($foregroundWindow -eq $consoleHandle)
+														
+														# If not, check if foreground window belongs to our process or parent process
+														if (-not $isConsoleFocused) {
+															$hasGetWindowThreadProcessId = [mJiggAPI.Mouse].GetMethod("GetWindowThreadProcessId") -ne $null
+															if ($hasGetWindowThreadProcessId) {
+																$fgProcessId = 0
+																[mJiggAPI.Mouse]::GetWindowThreadProcessId($foregroundWindow, [ref]$fgProcessId) | Out-Null
+																
+																# Check if foreground window belongs to our process
+																if ($fgProcessId -eq $PID) {
+																	# Foreground window belongs to our process - use it as the console handle
 																	$consoleHandle = $foregroundWindow
 																	$isConsoleFocused = $true
+																} else {
+																	# Check if foreground window belongs to parent process (Windows Terminal)
+																	try {
+																		$currentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
+																		if ($null -ne $currentProcess -and $null -ne $currentProcess.Parent -and $fgProcessId -eq $currentProcess.Parent.Id) {
+																			# Foreground window belongs to parent - use it as the console handle
+																			$consoleHandle = $foregroundWindow
+																			$isConsoleFocused = $true
+																		}
+																	} catch {
+																		# Parent check failed
+																	}
 																}
-															} catch {
-																# Parent check failed
-															}
-														}
-														
-														# Update debug info (only if DebugMode)
-														if ($DebugMode) {
-															$fgProcessName = "Unknown"
-															try {
-																$fgProcess = Get-Process -Id $fgProcessId -ErrorAction SilentlyContinue
-																if ($null -ne $fgProcess) {
-																	$fgProcessName = $fgProcess.ProcessName
+																
+																if ($DebugMode) {
+																	# Add debug info showing process IDs
+																	$fgProcessName = "Unknown"
+																	try {
+																		$fgProcess = Get-Process -Id $fgProcessId -ErrorAction SilentlyContinue
+																		if ($null -ne $fgProcess) {
+																			$fgProcessName = $fgProcess.ProcessName
+																		}
+																	} catch { }
+																	
+																	$debugInfo.focus = if ($isConsoleFocused) { 
+																		"yes (fg=$($foregroundWindow.ToInt64()), console=$($consoleHandle.ToInt64()), fgPID=$fgProcessId)" 
+																	} else { 
+																		"no (fg=$($foregroundWindow.ToInt64()), console=$($consoleHandle.ToInt64()), fgPID=$fgProcessId($fgProcessName))" 
+																	}
+																} else {
+																	$debugInfo.focus = if ($isConsoleFocused) { "yes" } else { "no" }
 																}
-															} catch { }
-															
-															$debugInfo.focus = if ($isConsoleFocused) { 
-																"yes (fg=$($foregroundWindow.ToInt64()), console=$($consoleHandle.ToInt64()), fgPID=$fgProcessId)" 
-															} else { 
-																"no (fg=$($foregroundWindow.ToInt64()), console=$($consoleHandle.ToInt64()), fgPID=$fgProcessId($fgProcessName))" 
+															} else {
+																# Can't check process ID
+																if ($DebugMode) {
+																	$debugInfo.focus = "no (fg=$($foregroundWindow.ToInt64()), console=$($consoleHandle.ToInt64()), can't check PID)"
+																} else {
+																	$debugInfo.focus = "no"
+																}
 															}
 														} else {
-															$debugInfo.focus = if ($isConsoleFocused) { "yes" } else { "no" }
+															# Handles match
+															if ($DebugMode) {
+																$debugInfo.focus = "yes (fg=$($foregroundWindow.ToInt64()), console=$($consoleHandle.ToInt64()))"
+															} else {
+																$debugInfo.focus = "yes"
+															}
 														}
-													} else {
-														# Can't check process ID
-														if ($DebugMode) {
-															$debugInfo.focus = "no (fg=$($foregroundWindow.ToInt64()), console=$($consoleHandle.ToInt64()), can't check PID)"
-														} else {
-															$debugInfo.focus = "no"
-														}
+													} catch {
+														$isConsoleFocused = $true  # Fallback: assume focused
+														$debugInfo.focus = "yes (fallback: $($_.Exception.Message))"
 													}
-												} else {
-													# Handles match
-													if ($DebugMode) {
-														$debugInfo.focus = "yes (fg=$($foregroundWindow.ToInt64()), console=$($consoleHandle.ToInt64()))"
-													} else {
-														$debugInfo.focus = "yes"
-													}
-												}
-											} catch {
-												$isConsoleFocused = $true  # Fallback: assume focused
-												if ($DebugMode) {
-													$debugInfo.focus = "yes (fallback: $($_.Exception.Message))"
-												} else {
-													$debugInfo.focus = "yes"
-												}
-											}
 													
 													# Convert screen coordinates to client (console window) coordinates
 													if ($gotCursorPos) {
@@ -4670,97 +4977,48 @@ namespace mJiggAPI {
 																				
 																				# Check if click is on any menu item (with tolerance for Y coordinate)
 																				# Only check menu items if dialog is not open
-																				# IMPORTANT: Check that MenuItemsBounds exists and has items, and that Output is full
-																				if ($null -eq $script:DialogButtonBounds -and $Output -eq "full") {
-																					# If MenuItemsBounds is null or empty, menu hasn't been rendered yet - skip click detection
-																					if ($null -ne $script:MenuItemsBounds -and $script:MenuItemsBounds.Count -gt 0) {
-																						# Check if click is on any menu item
-																						$clickMatched = $false
-																						foreach ($menuItem in $script:MenuItemsBounds) {
-																							# Allow Y coordinate to match exactly or be within 1 row (for click detection tolerance)
-																							$yMatches = ($consoleY -eq $menuItem.y -or $consoleY -eq ($menuItem.y - 1) -or $consoleY -eq ($menuItem.y + 1))
-																							# Check if click X is within the full menu item bounds (including emoji and all text)
-																							# Use inclusive bounds: startX <= clickX <= endX
-																							$xMatches = ($consoleX -ge $menuItem.startX -and $consoleX -le $menuItem.endX)
-																							
-																							if ($DebugMode -and $yMatches) {
-																								# Debug: log bounds check for this menu item
-																								if ($null -eq $LogArray -or -not ($LogArray -is [Array])) {
-																									$LogArray = @()
-																								}
-																								$LogArray += [PSCustomObject]@{
-																									logRow = $true
-																									components = @(
-																										@{
-																											priority = 1
-																											text = (Get-Date).ToString("HH:mm:ss")
-																											shortText = (Get-Date).ToString("HH:mm:ss")
-																										},
-																										@{
-																											priority = 2
-																											text = " - [DEBUG] Menu[$($menuItem.index)]: clickX=$consoleX, startX=$($menuItem.startX), endX=$($menuItem.endX), xMatches=$xMatches, yMatches=$yMatches, hotkey=$($menuItem.hotkey)"
-																											shortText = " - [DEBUG] Menu[$($menuItem.index)]: $($menuItem.startX)-$($menuItem.endX), click=$consoleX"
-																										}
-																									)
-																								}
-																							}
-																							
-																							if ($yMatches -and $xMatches) {
-																								# Click matches this menu item - trigger the hotkey action
-																								if ($null -ne $menuItem.hotkey) {
-																									$script:MenuClickHotkey = $menuItem.hotkey
-																									$clickMatched = $true
-																									$debugInfo.button = "Menu[$($menuItem.index)]: $($menuItem.hotkey)"
-																									break
-																								}
-																							}
-																						}
+																				if ($null -eq $script:DialogButtonBounds -and $Output -eq "full" -and $null -ne $script:MenuItemsBounds -and $script:MenuItemsBounds.Count -gt 0) {
+																					# Check if click is on any menu item (with tolerance for Y coordinate)
+																					# Also try simpler coordinate matching as fallback
+																					$clickMatched = $false
+																					foreach ($menuItem in $script:MenuItemsBounds) {
+																						# Allow Y coordinate to match exactly or be within 1 row (for click detection tolerance)
+																						$yMatches = ($consoleY -eq $menuItem.y -or $consoleY -eq ($menuItem.y - 1) -or $consoleY -eq ($menuItem.y + 1))
+																						$xMatches = ($consoleX -ge $menuItem.startX -and $consoleX -le $menuItem.endX)
 																						
-																						# Fallback: if precise matching failed, try simpler approach
-																						# Check if click Y is in menu row area, then find closest menu item by X
-																						if (-not $clickMatched -and $script:MenuItemsBounds.Count -gt 0) {
-																							# Get the menu row Y coordinate (should be same for all items)
-																							$menuRowY = $script:MenuItemsBounds[0].y
-																							# Check if click Y is close to menu row (within 3 rows for tolerance)
-																							if ([Math]::Abs($consoleY - $menuRowY) -le 3) {
-																								# Find the menu item whose X range the click is closest to
-																								$closestItem = $null
-																								$closestDistance = [int]::MaxValue
-																								foreach ($menuItem in $script:MenuItemsBounds) {
-																									# Calculate distance from click X to menu item center
-																									$itemCenterX = ($menuItem.startX + $menuItem.endX) / 2
-																									$distance = [Math]::Abs($consoleX - $itemCenterX)
-																									if ($distance -lt $closestDistance) {
-																										$closestDistance = $distance
-																										$closestItem = $menuItem
-																									}
-																								}
-																								# If click is reasonably close to a menu item (within 10 characters), trigger it
-																								if ($null -ne $closestItem -and $closestDistance -le 10 -and $null -ne $closestItem.hotkey) {
-																									$script:MenuClickHotkey = $closestItem.hotkey
-																									$debugInfo.button = "Menu[$($closestItem.index)]: $($closestItem.hotkey) (fallback)"
-																								}
+																						if ($yMatches -and $xMatches) {
+																							# Click matches this menu item - trigger the hotkey action
+																							if ($null -ne $menuItem.hotkey) {
+																								$script:MenuClickHotkey = $menuItem.hotkey
+																								$clickMatched = $true
+																								break
 																							}
 																						}
-																					} elseif ($DebugMode) {
-																						# Debug: log that menu bounds are not available
-																						if ($null -eq $LogArray -or -not ($LogArray -is [Array])) {
-																							$LogArray = @()
-																						}
-																						$LogArray += [PSCustomObject]@{
-																							logRow = $true
-																							components = @(
-																								@{
-																									priority = 1
-																									text = (Get-Date).ToString("HH:mm:ss")
-																									shortText = (Get-Date).ToString("HH:mm:ss")
-																								},
-																								@{
-																									priority = 2
-																									text = " - [DEBUG] Menu click detected but MenuItemsBounds is null or empty (menu not rendered yet?)"
-																									shortText = " - [DEBUG] No menu bounds"
+																					}
+																					
+																					# Fallback: if precise matching failed, try simpler approach
+																					# Check if click Y is in menu row area, then find closest menu item by X
+																					if (-not $clickMatched -and $script:MenuItemsBounds.Count -gt 0) {
+																						# Get the menu row Y coordinate (should be same for all items)
+																						$menuRowY = $script:MenuItemsBounds[0].y
+																						# Check if click Y is close to menu row (within 3 rows for tolerance)
+																						if ([Math]::Abs($consoleY - $menuRowY) -le 3) {
+																							# Find the menu item whose X range the click is closest to
+																							$closestItem = $null
+																							$closestDistance = [int]::MaxValue
+																							foreach ($menuItem in $script:MenuItemsBounds) {
+																								# Calculate distance from click X to menu item center
+																								$itemCenterX = ($menuItem.startX + $menuItem.endX) / 2
+																								$distance = [Math]::Abs($consoleX - $itemCenterX)
+																								if ($distance -lt $closestDistance) {
+																									$closestDistance = $distance
+																									$closestItem = $menuItem
 																								}
-																							)
+																							}
+																							# If click is reasonably close to a menu item (within 10 characters), trigger it
+																							if ($null -ne $closestItem -and $closestDistance -le 10 -and $null -ne $closestItem.hotkey) {
+																								$script:MenuClickHotkey = $closestItem.hotkey
+																							}
 																						}
 																					}
 																				}
@@ -4881,389 +5139,66 @@ namespace mJiggAPI {
 														$isConsoleFocused = $true
 													}
 												}
-											} catch {
-												# Log error for debugging
-												$debugInfo.focus = "error: $($_.Exception.Message)"
-											}
-										}
-										
-										# Convert screen coordinates to client (console window) coordinates (always needed for click detection)
-											if ($gotCursorPos -and $isConsoleFocused) {
-												$clientPoint = New-Object mJiggAPI.POINT
-												$clientPoint.X = $mousePoint.X
-												$clientPoint.Y = $mousePoint.Y
-												$hasScreenToClient = [mJiggAPI.Mouse].GetMethod("ScreenToClient") -ne $null
-												if ($hasScreenToClient) {
-													$screenToClientOk = [mJiggAPI.Mouse]::ScreenToClient($consoleHandle, [ref]$clientPoint)
-													if ($screenToClientOk) {
-														# Get console window rect to calculate character cell size
-														$windowRect = New-Object mJiggAPI.RECT
-														$hasGetWindowRect = [mJiggAPI.Mouse].GetMethod("GetWindowRect") -ne $null
-														if ($hasGetWindowRect) {
-															$getWindowRectOk = [mJiggAPI.Mouse]::GetWindowRect($consoleHandle, [ref]$windowRect)
-															if ($getWindowRectOk) {
-																# Get console buffer info for accurate coordinate conversion
-																$stdOutHandle = [IntPtr]::Zero
-																$hasGetStdHandle = [mJiggAPI.Mouse].GetMethod("GetStdHandle") -ne $null
-																if ($hasGetStdHandle) {
-																	$stdOutHandle = [mJiggAPI.Mouse]::GetStdHandle(-11)  # STD_OUTPUT_HANDLE
-																}
-																$bufferInfo = New-Object mJiggAPI.CONSOLE_SCREEN_BUFFER_INFO
-																$hasGetBufferInfo = [mJiggAPI.Mouse].GetMethod("GetConsoleScreenBufferInfo") -ne $null
-																if ($hasGetBufferInfo -and $stdOutHandle -ne [IntPtr]::Zero) {
-																	$getBufferInfoOk = [mJiggAPI.Mouse]::GetConsoleScreenBufferInfo($stdOutHandle, [ref]$bufferInfo)
-																	if ($getBufferInfoOk) {
-																		# Use buffer info to get visible window area
-																		$visibleLeft = $bufferInfo.srWindow.Left
-																		$visibleTop = $bufferInfo.srWindow.Top
-																		$visibleRight = $bufferInfo.srWindow.Right
-																		$visibleBottom = $bufferInfo.srWindow.Bottom
-																		
-																		# Calculate character cell size from window dimensions and visible buffer area
-																		$visibleWidth = $visibleRight - $visibleLeft + 1
-																		$visibleHeight = $visibleBottom - $visibleTop + 1
-																		$windowWidth = $windowRect.Right - $windowRect.Left
-																		$windowHeight = $windowRect.Bottom - $windowRect.Top
-																		
-																		# Account for window borders (approximate: 8px left/right, 30px top for title bar, 8px bottom)
-																		$borderLeft = 8
-																		$borderTop = 30
-																		$borderRight = 8
-																		$borderBottom = 8
-																		$clientWidth = $windowWidth - $borderLeft - $borderRight
-																		$clientHeight = $windowHeight - $borderTop - $borderBottom
-																		
-																		# Calculate character cell size
-																		$charWidth = $clientWidth / $visibleWidth
-																		$charHeight = $clientHeight / $visibleHeight
-																		
-																		# Convert client coordinates to console buffer coordinates
-																		# Account for borders
-																		$adjustedX = $clientPoint.X - $borderLeft
-																		$adjustedY = $clientPoint.Y - $borderTop
-																		$consoleX = [Math]::Floor($adjustedX / $charWidth) + $visibleLeft
-																		$consoleY = [Math]::Floor($adjustedY / $charHeight) + $visibleTop
-																		
-																		# Update debug info (only if DebugMode)
-																		if ($DebugMode) {
-																			$debugInfo.consoleX = $consoleX
-																			$debugInfo.consoleY = $consoleY
-																		}
-																		
-																		# Check if a dialog is open and if click is on a dialog button (ALWAYS check, not just in DebugMode)
-																		if ($null -ne $script:DialogButtonBounds -and $isConsoleFocused) {
-																			$bounds = $script:DialogButtonBounds
-																			
-																			# Check if click Y matches button row (with tolerance)
-																			if ($consoleY -eq $bounds.buttonRowY -or $consoleY -eq ($bounds.buttonRowY - 1) -or $consoleY -eq ($bounds.buttonRowY + 1)) {
-																				# Check if click is on Update button
-																				if ($consoleX -ge $bounds.updateStartX -and $consoleX -le $bounds.updateEndX) {
-																					$script:DialogButtonClick = "Update"
-																					$clickedButton = "Update"
-																					if ($DebugMode) {
-																						$debugInfo.button = "Update"
-																					}
-																				}
-																				# Check if click is on Cancel button
-																				elseif ($consoleX -ge $bounds.cancelStartX -and $consoleX -le $bounds.cancelEndX) {
-																					$script:DialogButtonClick = "Cancel"
-																					$clickedButton = "Cancel"
-																					if ($DebugMode) {
-																						$debugInfo.button = "Cancel"
-																					}
-																				}
-																			}
-																		}
-																		
-																		# Check if click is on any menu item (ALWAYS check, not just in DebugMode)
-																		# Only check menu items if dialog is not open
-																		if ($null -eq $script:DialogButtonBounds -and $Output -eq "full") {
-																			# If MenuItemsBounds is null or empty, menu hasn't been rendered yet - skip click detection
-																			if ($null -ne $script:MenuItemsBounds -and $script:MenuItemsBounds.Count -gt 0) {
-																				# Check if click is on any menu item
-																				$clickMatched = $false
-																				foreach ($menuItem in $script:MenuItemsBounds) {
-																					# Allow Y coordinate to match exactly or be within 1 row (for click detection tolerance)
-																					$yMatches = ($consoleY -eq $menuItem.y -or $consoleY -eq ($menuItem.y - 1) -or $consoleY -eq ($menuItem.y + 1))
-																					# Check if click X is within the full menu item bounds (including emoji and all text)
-																					# Use inclusive bounds: startX <= clickX <= endX
-																					$xMatches = ($consoleX -ge $menuItem.startX -and $consoleX -le $menuItem.endX)
-																					
-																					# Debug logging (only if DebugMode)
-																					if ($DebugMode -and $yMatches) {
-																						# Debug: log bounds check for this menu item
-																						if ($null -eq $LogArray -or -not ($LogArray -is [Array])) {
-																							$LogArray = @()
-																						}
-																						$LogArray += [PSCustomObject]@{
-																							logRow = $true
-																							components = @(
-																								@{
-																									priority = 1
-																									text = (Get-Date).ToString("HH:mm:ss")
-																									shortText = (Get-Date).ToString("HH:mm:ss")
-																								},
-																								@{
-																									priority = 2
-																									text = " - [DEBUG] Menu[$($menuItem.index)]: clickX=$consoleX, startX=$($menuItem.startX), endX=$($menuItem.endX), xMatches=$xMatches, yMatches=$yMatches, hotkey=$($menuItem.hotkey)"
-																									shortText = " - [DEBUG] Menu[$($menuItem.index)]: $($menuItem.startX)-$($menuItem.endX), click=$consoleX"
-																								}
-																							)
-																						}
-																					}
-																					
-																					# Click detection (ALWAYS happens, not just in DebugMode)
-																					if ($yMatches -and $xMatches) {
-																						# Click matches this menu item - trigger the hotkey action
-																						if ($null -ne $menuItem.hotkey) {
-																							$script:MenuClickHotkey = $menuItem.hotkey
-																							$clickMatched = $true
-																							$clickedButton = "Menu[$($menuItem.index)]: $($menuItem.hotkey)"
-																							if ($DebugMode) {
-																								$debugInfo.button = $clickedButton
-																							}
-																							break
-																						}
-																					}
-																				}
-																				
-																				# Fallback: if precise matching failed, try simpler approach
-																				# Check if click Y is in menu row area, then find closest menu item by X
-																				if (-not $clickMatched -and $script:MenuItemsBounds.Count -gt 0) {
-																					# Get the menu row Y coordinate (should be same for all items)
-																					$menuRowY = $script:MenuItemsBounds[0].y
-																					# Check if click Y is close to menu row (within 3 rows for tolerance)
-																					if ([Math]::Abs($consoleY - $menuRowY) -le 3) {
-																						# Find the menu item whose X range the click is closest to
-																						$closestItem = $null
-																						$closestDistance = [int]::MaxValue
-																						foreach ($menuItem in $script:MenuItemsBounds) {
-																							# Calculate distance from click X to menu item center
-																							$itemCenterX = ($menuItem.startX + $menuItem.endX) / 2
-																							$distance = [Math]::Abs($consoleX - $itemCenterX)
-																							if ($distance -lt $closestDistance) {
-																								$closestDistance = $distance
-																								$closestItem = $menuItem
-																							}
-																						}
-																						# If click is reasonably close to a menu item (within 10 characters), trigger it
-																						if ($null -ne $closestItem -and $closestDistance -le 10 -and $null -ne $closestItem.hotkey) {
-																							$script:MenuClickHotkey = $closestItem.hotkey
-																							$clickedButton = "Menu[$($closestItem.index)]: $($closestItem.hotkey) (fallback)"
-																							if ($DebugMode) {
-																								$debugInfo.button = $clickedButton
-																							}
-																						}
-																					}
-																				}
-																			} elseif ($DebugMode) {
-																				# Debug: log that menu bounds are not available
-																				if ($null -eq $LogArray -or -not ($LogArray -is [Array])) {
-																					$LogArray = @()
-																				}
-																				$LogArray += [PSCustomObject]@{
-																					logRow = $true
-																					components = @(
-																						@{
-																							priority = 1
-																							text = (Get-Date).ToString("HH:mm:ss")
-																							shortText = (Get-Date).ToString("HH:mm:ss")
-																						},
-																						@{
-																							priority = 2
-																							text = " - [DEBUG] Menu click detected but MenuItemsBounds is null or empty (menu not rendered yet?)"
-																							shortText = " - [DEBUG] No menu bounds"
-																						}
-																					)
-																				}
-																			}
-																		}
-																	}
-																}
-															}
-														}
-													}
-												}
-											}
-										} else {
-											# Console handle is zero - try alternative methods (fallback for click detection)
-											# This code path is needed for Windows Terminal compatibility
-											try {
-												$currentProcess = Get-Process -Id $PID
-												$mainWindowHandle = $currentProcess.MainWindowHandle
-												if ($mainWindowHandle -ne [IntPtr]::Zero) {
-													$consoleHandle = $mainWindowHandle
-													# Try to check focus with the alternative handle
-													try {
-														$foregroundWindow = [mJiggAPI.Mouse]::GetForegroundWindow()
-														$isConsoleFocused = ($foregroundWindow -eq $consoleHandle)
-														if ($DebugMode) {
-															$debugInfo.focus = if ($isConsoleFocused) { 
-																"yes (alt, fg=$($foregroundWindow.ToInt64()), console=$($consoleHandle.ToInt64()))" 
-															} else { 
-																"no (alt, fg=$($foregroundWindow.ToInt64()), console=$($consoleHandle.ToInt64()))" 
-															}
-														} else {
-															$debugInfo.focus = if ($isConsoleFocused) { "yes (alt)" } else { "no (alt)" }
-														}
-													} catch {
-														$isConsoleFocused = $true
-														if ($DebugMode) {
-															$debugInfo.focus = "yes (alt fallback: $($_.Exception.Message))"
-														} else {
-															$debugInfo.focus = "yes"
-														}
-													}
-												} else {
-													# Try to find window handle using FindWindow
-													try {
-														$foundHandle = Find-WindowHandle -ProcessId $PID
-														if ($foundHandle -ne [IntPtr]::Zero) {
-															$consoleHandle = $foundHandle
-															# Check focus with found window handle
-															try {
-																$foregroundWindow = [mJiggAPI.Mouse]::GetForegroundWindow()
-																$isConsoleFocused = ($foregroundWindow -eq $consoleHandle)
-																if ($DebugMode) {
-																	$debugInfo.focus = if ($isConsoleFocused) { "yes (found)" } else { "no (found)" }
-																} else {
-																	$debugInfo.focus = if ($isConsoleFocused) { "yes" } else { "no" }
-																}
-															} catch {
-																$isConsoleFocused = $true
-																if ($DebugMode) {
-																	$debugInfo.focus = "yes (found fallback: $($_.Exception.Message))"
-																} else {
-																	$debugInfo.focus = "yes"
-																}
-															}
-														} else {
-															# Last resort: assume focused and proceed without window handle
-															$isConsoleFocused = $true
-															if ($DebugMode) {
-																$debugInfo.focus = "assumed (no handle)"
-															} else {
-																$debugInfo.focus = "yes"
-															}
-														}
-													} catch {
-														# FindWindow method failed, assume focused
-														$isConsoleFocused = $true
-														if ($DebugMode) {
-															$debugInfo.focus = "assumed (FindWindow failed)"
-														} else {
-															$debugInfo.focus = "yes"
-														}
-													}
-												}
-											} catch {
-												# All methods failed, assume focused
-												$isConsoleFocused = $true
-												if ($DebugMode) {
-													$debugInfo.focus = "assumed (Get-Process failed)"
-												} else {
-													$debugInfo.focus = "yes"
-												}
-											}
-										}
-									} catch {
-										# Log error for debugging
-										if ($DebugMode) {
+										} catch {
+											# Log error for debugging
 											$debugInfo.focus = "error: $($_.Exception.Message)"
 										}
-									}
 									
-									# Click detection and actions are complete - now handle logging (with delay)
-									# IMPORTANT: Click actions (MenuClickHotkey/DialogButtonClick) have already been set above
-									# Only the logging is delayed to prevent console stutter during mouse movement
-									$shouldLogClick = $true
-									if ($DebugMode) {
-										# Check debounce timer
-										if ($null -ne $script:LastClickLogTime) {
-											$timeSinceLastClickLog = ((Get-Date) - $script:LastClickLogTime).TotalMilliseconds
-											if ($timeSinceLastClickLog -lt 300) {
-												$shouldLogClick = $false
-											}
+										# Create a single consolidated log entry with all debug information (only in debug mode)
+										if ($null -eq $LogArray -or -not ($LogArray -is [Array])) {
+											$LogArray = @()
 										}
-										
-										# Check if mouse is currently moving - if so, delay logging (but action already happened)
-										if ($null -ne $script:LastMouseMovementTime) {
-											$timeSinceMouseMovement = ((Get-Date) - $script:LastMouseMovementTime).TotalMilliseconds
-											# Don't log if mouse moved within last 200ms (but click action already processed)
-											if ($timeSinceMouseMovement -lt 200) {
-												$shouldLogClick = $false
-											}
+										$LogArray += [PSCustomObject]@{
+											logRow = $true
+											components = @(
+												@{
+													priority = 1
+													text = (Get-Date).ToString("HH:mm:ss")
+													shortText = (Get-Date).ToString("HH:mm:ss")
+												},
+												@{
+													priority = 2
+													text = " - [DEBUG] LButton clicked - Focus: $($debugInfo.focus), Screen: ($($debugInfo.screenX),$($debugInfo.screenY)), Console: ($($debugInfo.consoleX),$($debugInfo.consoleY)), Button: $($debugInfo.button)"
+													shortText = " - [DEBUG] LButton - Focus: $($debugInfo.focus), Coords: ($($debugInfo.consoleX),$($debugInfo.consoleY)), Button: $($debugInfo.button)"
+												}
+											)
 										}
-										
-										# Update debugInfo.button with actual clicked button if not already set
-										if ($clickedButton -ne "none" -and $debugInfo.button -eq "none") {
-											$debugInfo.button = $clickedButton
-										}
-										
-										# Create log entry only if we should log (delayed logging)
-										if ($shouldLogClick) {
-											if ($null -eq $LogArray -or -not ($LogArray -is [Array])) {
-												$LogArray = @()
-											}
-											$LogArray += [PSCustomObject]@{
-												logRow = $true
-												components = @(
-													@{
-														priority = 1
-														text = (Get-Date).ToString("HH:mm:ss")
-														shortText = (Get-Date).ToString("HH:mm:ss")
-													},
-													@{
-														priority = 2
-														text = " - [DEBUG] LButton clicked - Focus: $($debugInfo.focus), Screen: ($($debugInfo.screenX),$($debugInfo.screenY)), Console: ($($debugInfo.consoleX),$($debugInfo.consoleY)), Button: $($debugInfo.button)"
-														shortText = " - [DEBUG] LButton - Focus: $($debugInfo.focus), Coords: ($($debugInfo.consoleX),$($debugInfo.consoleY)), Button: $($debugInfo.button)"
-													}
-												)
-											}
-											
-											# Record when we logged this click for debouncing
-											$script:LastClickLogTime = Get-Date
-										}
+									
+										# Record when we logged this click for debouncing
+										$script:LastClickLogTime = Get-Date
 									}
 									
 									# Click action has been processed (MenuClickHotkey or DialogButtonClick set)
 									# No need to force immediate redraw - actions will be processed on next loop iteration
 									# The log will appear when mouse movement delay expires (handled by skipConsoleUpdate logic)
-								} catch {
-									# Log error for debugging
-									if ($DebugMode) {
-										$debugInfo.focus = "error: $($_.Exception.Message)"
+								}
+									
+									$mouseButtonName = Get-KeyName -keyCode $keyCode
+									if (-not $mouseButtonName) {
+										if ($keyCode -eq 0x07) { $mouseButtonName = "XButton3" }
+										elseif ($keyCode -eq 0x08) { $mouseButtonName = "XButton4" }
+										elseif ($keyCode -eq 0x09) { $mouseButtonName = "XButton5" }
+										elseif ($keyCode -eq 0x0A) { $mouseButtonName = "XButton6" }
+										elseif ($keyCode -eq 0x0B) { $mouseButtonName = "XButton7" }
+										elseif ($keyCode -eq 0x0C) { $mouseButtonName = "XButton8" }
+										elseif ($keyCode -eq 0x0D) { $mouseButtonName = "XButton9" }
+										elseif ($keyCode -eq 0x0E) { $mouseButtonName = "XButton10" }
+										elseif ($keyCode -eq 0x0F) { $mouseButtonName = "XButton11" }
+									}
+									if ($mouseButtonName -and $intervalMouseInputs -notcontains $mouseButtonName) {
+										$intervalMouseInputs += $mouseButtonName
+										$script:userInputDetected = $true
+										$mouseInputDetected = $true
+										if ($script:AutoResumeDelaySeconds -gt 0) {
+											$LastUserInputTime = Get-Date
+										}
 									}
 								}
+								$script:previousKeyStates[$keyCode] = $isCurrentlyPressed
+								continue
 							}
 							
-							# Handle all mouse button presses (for user input detection)
-							# This code runs for ALL mouse buttons, not just left button clicks
-							# Note: This is inside the outer if ($wasJustPressed...) block, so it will run for all mouse buttons
-							$mouseButtonName = Get-KeyName -keyCode $keyCode
-							if (-not $mouseButtonName) {
-								if ($keyCode -eq 0x07) { $mouseButtonName = "XButton3" }
-								elseif ($keyCode -eq 0x08) { $mouseButtonName = "XButton4" }
-								elseif ($keyCode -eq 0x09) { $mouseButtonName = "XButton5" }
-								elseif ($keyCode -eq 0x0A) { $mouseButtonName = "XButton6" }
-								elseif ($keyCode -eq 0x0B) { $mouseButtonName = "XButton7" }
-								elseif ($keyCode -eq 0x0C) { $mouseButtonName = "XButton8" }
-								elseif ($keyCode -eq 0x0D) { $mouseButtonName = "XButton9" }
-								elseif ($keyCode -eq 0x0E) { $mouseButtonName = "XButton10" }
-								elseif ($keyCode -eq 0x0F) { $mouseButtonName = "XButton11" }
-							}
-							if ($mouseButtonName -and $intervalMouseInputs -notcontains $mouseButtonName) {
-								$intervalMouseInputs += $mouseButtonName
-								$userInputDetected = $true
-								$mouseInputDetected = $true
-								if ($script:AutoResumeDelaySeconds -gt 0) {
-									$LastUserInputTime = Get-Date
-								}
-							}
-							$script:previousKeyStates[$keyCode] = $isCurrentlyPressed
-						}
-						else {
-							# Not a mouse button, check keyboard keys
+							# Check keyboard keys
 							$currentKeyState = [mJiggAPI.Keyboard]::GetAsyncKeyState($keyCode)
 							$isCurrentlyPressed = (($currentKeyState -band 0x8000) -ne 0)
 							$wasJustPressed = (($currentKeyState -band 0x0001) -ne 0)
@@ -5285,7 +5220,7 @@ namespace mJiggAPI {
 									}
 								}
 								if ($keyAdded) {
-									$userInputDetected = $true
+									$script:userInputDetected = $true
 									$keyboardInputDetected = $true
 									if ($script:AutoResumeDelaySeconds -gt 0) {
 										$LastUserInputTime = Get-Date
@@ -5374,11 +5309,12 @@ namespace mJiggAPI {
 									$runtimeStr = "$seconds second$(if ($seconds -ne 1) { 's' })"
 								}
 								Write-Host ""
-								Write-Host "  mJig(`u{1F400}) " -NoNewline -ForegroundColor Magenta
-								Write-Host "Stopped" -ForegroundColor Red
+								$mouseEmoji = [char]::ConvertFromUtf32(0x1F400)
+								Write-Host "  mJig($mouseEmoji) " -NoNewline -ForegroundColor $script:HeaderAppName
+								Write-Host "Stopped" -ForegroundColor $script:TextError
 								Write-Host ""
-								Write-Host "  Runtime: " -NoNewline -ForegroundColor Yellow
-								Write-Host $runtimeStr -ForegroundColor Green
+								Write-Host "  Runtime: " -NoNewline -ForegroundColor $script:StatsLabel
+								Write-Host $runtimeStr -ForegroundColor $script:StatsValue
 								Write-Host ""
 								return
 							} else {
@@ -5460,13 +5396,17 @@ namespace mJiggAPI {
 										$runtimeStr = "$seconds second$(if ($seconds -ne 1) { 's' })"
 									}
 									Write-Host ""
-									Write-Host "  mJig(" -NoNewline -ForegroundColor Magenta
-									Write-Host "`u{1F400}" -NoNewline -ForegroundColor White
-									Write-Host ") " -NoNewline -ForegroundColor Magenta
-									Write-Host "Stopped" -ForegroundColor Red
+									$mouseEmoji = [char]::ConvertFromUtf32(0x1F400)
+									Write-Host "  mJig(" -NoNewline -ForegroundColor $script:HeaderAppName
+									$mouseEmojiX = $Host.UI.RawUI.CursorPosition.X
+									$mouseEmojiY = $Host.UI.RawUI.CursorPosition.Y
+									Write-Host $mouseEmoji -NoNewline -ForegroundColor $script:HeaderIcon
+									[Console]::SetCursorPosition($mouseEmojiX + 2, $mouseEmojiY)
+									Write-Host ") " -NoNewline -ForegroundColor $script:HeaderAppName
+									Write-Host "Stopped" -ForegroundColor $script:TextError
 									Write-Host ""
-									Write-Host "  Runtime: " -NoNewline -ForegroundColor Yellow
-									Write-Host $runtimeStr -ForegroundColor Green
+									Write-Host "  Runtime: " -NoNewline -ForegroundColor $script:StatsLabel
+									Write-Host $runtimeStr -ForegroundColor $script:StatsValue
 									Write-Host ""
 									return
 								} else {
@@ -5525,9 +5465,9 @@ namespace mJiggAPI {
 												shortText = (Get-Date).ToString("HH:mm:ss")
 											},
 											@{
-												priority = 2
-												text = " - [DEBUG] View toggle: $oldOutput → $Output"
-												shortText = " - [DEBUG] View: $oldOutput → $Output"
+												priority = [int]2
+												text = " - [DEBUG] View toggle: $oldOutput $([char]0x2192) $Output"
+												shortText = " - [DEBUG] View: $oldOutput $([char]0x2192) $Output"
 											}
 										)
 									}
@@ -5563,9 +5503,9 @@ namespace mJiggAPI {
 												shortText = (Get-Date).ToString("HH:mm:ss")
 											},
 											@{
-												priority = 2
-												text = " - [DEBUG] Hide/Show toggle: $oldOutput → $Output"
-												shortText = " - [DEBUG] Hide/Show: $oldOutput → $Output"
+												priority = [int]2
+												text = " - [DEBUG] Hide/Show toggle: $oldOutput $([char]0x2192) $Output"
+												shortText = " - [DEBUG] Hide/Show: $oldOutput $([char]0x2192) $Output"
 											}
 										)
 									}
@@ -5629,8 +5569,6 @@ namespace mJiggAPI {
 									$SkipUpdate = $true
 									$forceRedraw = $true
 									clear-host
-									# IMPORTANT: Clear menu bounds so they get recalculated on next redraw after dialog closes
-									$script:MenuItemsBounds = $null
 									break
 								}
 								if ($null -ne $dialogResult.Result) {
@@ -5649,13 +5587,14 @@ namespace mJiggAPI {
 									$script:TravelVariance = $dialogResult.Result.TravelVariance
 									$script:AutoResumeDelaySeconds = $dialogResult.Result.AutoResumeDelaySeconds
 									$changeDetails = @()
-									if ($oldIntervalSeconds -ne $script:IntervalSeconds) { $changeDetails += "Interval: $oldIntervalSeconds → $($script:IntervalSeconds)" }
-									if ($oldIntervalVariance -ne $script:IntervalVariance) { $changeDetails += "IntervalVar: $oldIntervalVariance → $($script:IntervalVariance)" }
-									if ($oldMoveSpeed -ne $script:MoveSpeed) { $changeDetails += "Speed: $oldMoveSpeed → $($script:MoveSpeed)" }
-									if ($oldMoveVariance -ne $script:MoveVariance) { $changeDetails += "SpeedVar: $oldMoveVariance → $($script:MoveVariance)" }
-									if ($oldTravelDistance -ne $script:TravelDistance) { $changeDetails += "Distance: $oldTravelDistance → $($script:TravelDistance)" }
-									if ($oldTravelVariance -ne $script:TravelVariance) { $changeDetails += "DistVar: $oldTravelVariance → $($script:TravelVariance)" }
-									if ($oldAutoResumeDelaySeconds -ne $script:AutoResumeDelaySeconds) { $changeDetails += "Delay: $oldAutoResumeDelaySeconds → $($script:AutoResumeDelaySeconds)" }
+									$arrowChar = [char]0x2192
+									if ($oldIntervalSeconds -ne $script:IntervalSeconds) { $changeDetails += "Interval: $oldIntervalSeconds $arrowChar $($script:IntervalSeconds)" }
+									if ($oldIntervalVariance -ne $script:IntervalVariance) { $changeDetails += "IntervalVar: $oldIntervalVariance $arrowChar $($script:IntervalVariance)" }
+									if ($oldMoveSpeed -ne $script:MoveSpeed) { $changeDetails += "Speed: $oldMoveSpeed $arrowChar $($script:MoveSpeed)" }
+									if ($oldMoveVariance -ne $script:MoveVariance) { $changeDetails += "SpeedVar: $oldMoveVariance $arrowChar $($script:MoveVariance)" }
+									if ($oldTravelDistance -ne $script:TravelDistance) { $changeDetails += "Distance: $oldTravelDistance $arrowChar $($script:TravelDistance)" }
+									if ($oldTravelVariance -ne $script:TravelVariance) { $changeDetails += "DistVar: $oldTravelVariance $arrowChar $($script:TravelVariance)" }
+									if ($oldAutoResumeDelaySeconds -ne $script:AutoResumeDelaySeconds) { $changeDetails += "Delay: $oldAutoResumeDelaySeconds $arrowChar $($script:AutoResumeDelaySeconds)" }
 									if ($changeDetails.Count -gt 0) {
 										$changeDate = Get-Date
 										$changeMessage = " - Settings updated: " + ($changeDetails -join ", ")
@@ -5670,8 +5609,6 @@ namespace mJiggAPI {
 								$SkipUpdate = $true
 								$forceRedraw = $true
 								clear-host
-								# IMPORTANT: Clear menu bounds so they get recalculated on next redraw after dialog closes
-								$script:MenuItemsBounds = $null
 								break
 							} elseif ($lastKeyPress -eq "t") {
 								# Debug: Log time dialog opened (before calling dialog)
@@ -5728,8 +5665,6 @@ namespace mJiggAPI {
 									$SkipUpdate = $true
 									$forceRedraw = $true
 									clear-host
-									# IMPORTANT: Clear menu bounds so they get recalculated on next redraw after dialog closes
-									$script:MenuItemsBounds = $null
 									break
 								}
 								if ($null -ne $dialogResult.Result) {
@@ -5751,7 +5686,8 @@ namespace mJiggAPI {
 										$endTimeInt = $dialogResult.Result
 										$endTimeStr = $endTimeInt.ToString().PadLeft(4, '0')
 										$currentTime = Get-Date -Format "HHmm"
-										if ($endTimeInt -le [int]$currentTime) {
+										$isTomorrow = $endTimeInt -le [int]$currentTime
+										if ($isTomorrow) {
 											$tommorow = (Get-Date).AddDays(1)
 											$endDate = Get-Date $tommorow -Format "MMdd"
 										} else {
@@ -5759,8 +5695,12 @@ namespace mJiggAPI {
 										}
 										$end = "$endDate$endTimeStr"
 										$changeDate = Get-Date
-										$changeMessage = if ($oldEndTimeInt -eq -1 -or [string]::IsNullOrEmpty($oldEndTimeStr)) {" - End time set: $endTimeStr"} else {" - End time changed: $oldEndTimeStr → $endTimeStr"}
-										$changeShortMessage = " - End time: $endTimeStr"
+										$arrowChar = [char]0x2192
+										$dayLabel = if ($isTomorrow) { " (tomorrow)" } else { " (today)" }
+										$endDateDisplay = $endDate.Substring(0,2) + "/" + $endDate.Substring(2,2)
+										$endTimeDisplay = $endTimeStr.Substring(0,2) + ":" + $endTimeStr.Substring(2,2)
+										$changeMessage = if ($oldEndTimeInt -eq -1 -or [string]::IsNullOrEmpty($oldEndTimeStr)) {" - End time set: $endDateDisplay $endTimeDisplay$dayLabel"} else {" - End time changed: $oldEndTimeStr $arrowChar $endDateDisplay $endTimeDisplay$dayLabel"}
+										$changeShortMessage = " - End time: $endDateDisplay $endTimeDisplay"
 										$changeLogComponents = @(
 											@{priority = 1; text = $changeDate.ToString(); shortText = $changeDate.ToString("HH:mm:ss")},
 											@{priority = 2; text = $changeMessage; shortText = $changeShortMessage}
@@ -5771,8 +5711,6 @@ namespace mJiggAPI {
 								$SkipUpdate = $true
 								$forceRedraw = $true
 								clear-host
-								# IMPORTANT: Clear menu bounds so they get recalculated on next redraw after dialog closes
-								$script:MenuItemsBounds = $null
 								break
 							}
 						}
@@ -5835,10 +5773,72 @@ namespace mJiggAPI {
 								$newWindowSize.Height -ne $PendingResize.Height)
 							
 							if ($isNewSize) {
+								# Clear screen once when resize starts
+								if (-not $ResizeClearedScreen) {
+									Clear-Host
+									$ResizeClearedScreen = $true
+									$script:CurrentResizeQuote = $null  # Pick a new quote for this resize
+									Draw-ResizeLogo
+									$LastResizeLogoTime = Get-Date
+								}
 								# New size detected - store it and reset timer
 								$PendingResize = $newWindowSize
 								$lastResizeDetection = Get-Date
 							}
+						}
+						
+						# Tight redraw loop while resizing - bypasses the normal 50ms sleep
+						while ($ResizeClearedScreen) {
+							# Check for size changes
+							$newWindowSize = $pswindow.WindowSize
+							$isNewSize = ($null -eq $PendingResize -or 
+								$newWindowSize.Width -ne $PendingResize.Width -or 
+								$newWindowSize.Height -ne $PendingResize.Height)
+							
+							if ($isNewSize) {
+								$PendingResize = $newWindowSize
+								$lastResizeDetection = Get-Date
+								# Only redraw when size actually changes
+								Clear-Host
+								Draw-ResizeLogo
+								$LastResizeLogoTime = Get-Date
+							}
+							
+							# Check if resize is complete (stable for threshold)
+							$sizeMatchesPending = ($newWindowSize.Width -eq $PendingResize.Width -and 
+								$newWindowSize.Height -eq $PendingResize.Height)
+							if ($sizeMatchesPending) {
+								$timeSinceResize = Get-TimeSinceMs -startTime $lastResizeDetection
+								if ($timeSinceResize -ge $ResizeThrottleMs) {
+									# Resize complete - exit tight loop
+									$currentWindowSize = $pswindow.WindowSize
+									$currentBufferSize = $pswindow.BufferSize
+									try {
+										$pswindow.BufferSize = New-Object System.Management.Automation.Host.Size($currentBufferSize.Width, $currentWindowSize.Height)
+										$currentBufferSize = $pswindow.BufferSize
+									} catch { }
+									$OldBufferSize = $currentBufferSize
+									$oldWindowSize = $currentWindowSize
+									$HostWidth = $currentWindowSize.Width
+									$HostHeight = $currentWindowSize.Height
+									$SkipUpdate = $true
+									$forceRedraw = $true
+									$waitExecuted = $false
+									$PendingResize = $null
+									$lastResizeDetection = $null
+									$ResizeClearedScreen = $false
+									$LastResizeLogoTime = $null
+									break
+								}
+							}
+							
+							# Small sleep to prevent CPU spinning (1ms)
+							Start-Sleep -Milliseconds 1
+						}
+						
+						# If resize completed, break out of wait loop
+						if ($forceRedraw) {
+							break
 						}
 						
 						# Check if window has been stable (matches pending resize) long enough to process
@@ -5848,7 +5848,7 @@ namespace mJiggAPI {
 								$newWindowSize.Height -eq $PendingResize.Height)
 							
 							if ($sizeMatchesPending) {
-								$timeSinceResize = ((Get-Date) - $lastResizeDetection).TotalMilliseconds
+								$timeSinceResize = Get-TimeSinceMs -startTime $lastResizeDetection
 								if ($timeSinceResize -ge $ResizeThrottleMs) {
 									# Window has been stable long enough - process the resize
 									$currentWindowSize = $pswindow.WindowSize
@@ -5870,7 +5870,8 @@ namespace mJiggAPI {
 									$waitExecuted = $false  # Mark that wait was interrupted, don't log this
 									$PendingResize = $null  # Clear pending resize
 									$lastResizeDetection = $null  # Clear detection time
-									clear-host
+									$ResizeClearedScreen = $false  # Reset for next resize
+									$LastResizeLogoTime = $null  # Clear logo timer
 									# Break out of wait loop to immediately redraw
 									break
 								}
@@ -5879,11 +5880,14 @@ namespace mJiggAPI {
 					}
 					
 					start-sleep -m 50
-					if ($x -ge $math) { break }
-				}
+					
+					# Check if we've waited long enough
+					if ($x -ge $math) {
+						break
+					}
+				} # end :waitLoop
 			}
-			}  # end inner block (wait + if)
-			{
+			
 			# Keyboard and mouse input checking is now done every 200ms in the wait loop above
 			# This provides more reliable detection compared to checking once per interval
 			
@@ -5898,14 +5902,14 @@ namespace mJiggAPI {
 							$wheelText = "Scroll Up"
 							if ($intervalMouseInputs -notcontains $wheelText) {
 								$intervalMouseInputs += $wheelText
-								$userInputDetected = $true
+								$script:userInputDetected = $true
 								$mouseInputDetected = $true
 							}
 						} elseif ($deltaChange -lt 0) {
 							$wheelText = "Scroll Down"
 							if ($intervalMouseInputs -notcontains $wheelText) {
 								$intervalMouseInputs += $wheelText
-								$userInputDetected = $true
+								$script:userInputDetected = $true
 								$mouseInputDetected = $true
 							}
 						}
@@ -5978,9 +5982,27 @@ namespace mJiggAPI {
 						$newWindowSize.Height -ne $PendingResize.Height)
 					
 					if ($isNewSize) {
+						# Clear screen once when resize starts
+						if (-not $ResizeClearedScreen) {
+							Clear-Host
+							$ResizeClearedScreen = $true
+							$script:CurrentResizeQuote = $null  # Pick a new quote for this resize
+							Draw-ResizeLogo
+							$LastResizeLogoTime = Get-Date
+						}
 						# New size detected - store it and reset timer
 						$PendingResize = $newWindowSize
 						$lastResizeDetection = Get-Date
+					}
+				}
+				
+				# Redraw logo every 100ms while resizing
+				if ($ResizeClearedScreen -and $null -ne $LastResizeLogoTime) {
+					$timeSinceLogoDraw = Get-TimeSinceMs -startTime $LastResizeLogoTime
+					if ($timeSinceLogoDraw -ge 3) {
+						Clear-Host
+						Draw-ResizeLogo
+						$LastResizeLogoTime = Get-Date
 					}
 				}
 				
@@ -5991,7 +6013,7 @@ namespace mJiggAPI {
 						$newWindowSize.Height -eq $PendingResize.Height)
 					
 					if ($sizeMatchesPending) {
-						$timeSinceResize = ((Get-Date) - $lastResizeDetection).TotalMilliseconds
+						$timeSinceResize = Get-TimeSinceMs -startTime $lastResizeDetection
 						if ($timeSinceResize -ge $ResizeThrottleMs) {
 							# Window has been stable long enough - process the resize
 							$currentWindowSize = $pswindow.WindowSize
@@ -6012,7 +6034,8 @@ namespace mJiggAPI {
 							$forceRedraw = $true
 							$PendingResize = $null  # Clear pending resize
 							$lastResizeDetection = $null  # Clear detection time
-							clear-host
+							$ResizeClearedScreen = $false  # Reset for next resize
+							$LastResizeLogoTime = $null  # Clear logo timer
 						}
 					}
 				}
@@ -6021,17 +6044,60 @@ namespace mJiggAPI {
 			# Check if this is the first run (before we modify lastMovementTime)
 			$isFirstRun = ($null -eq $LastMovementTime)
 			
+			# Wait for mouse to stop moving before proceeding
+			# This prevents stutter by ensuring the mouse is settled before we do expensive operations
+			# Only do this if we actually waited (not on first run or force redraw)
+			if (-not $isFirstRun -and -not $forceRedraw) {
+				$mouseSettleMs = 150  # Must be still for this long
+				$lastSettleCheckPos = Get-MousePosition
+				$mouseSettledTime = $null
+				$settleLoopCount = 0
+				$maxMoveDelta = 0
+				
+				if ($script:DiagEnabled) {
+					"$(Get-Date -Format 'HH:mm:ss.fff') - Loop $($script:LoopIteration): Starting settle wait, pos: $($lastSettleCheckPos.X),$($lastSettleCheckPos.Y)" | Out-File $script:SettleDiagFile -Append
+				}
+				
+				while ($true) {
+					$settleLoopCount++
+					Start-Sleep -Milliseconds 25
+					$currentSettlePos = Get-MousePosition
+					
+					$mouseMoved = $false
+					if ($null -ne $currentSettlePos -and $null -ne $lastSettleCheckPos) {
+						$deltaX = [Math]::Abs($currentSettlePos.X - $lastSettleCheckPos.X)
+						$deltaY = [Math]::Abs($currentSettlePos.Y - $lastSettleCheckPos.Y)
+						$moveDelta = [Math]::Max($deltaX, $deltaY)
+						if ($moveDelta -gt $maxMoveDelta) { $maxMoveDelta = $moveDelta }
+						if ($deltaX -gt 2 -or $deltaY -gt 2) {
+							$mouseMoved = $true
+						}
+					}
+					$lastSettleCheckPos = $currentSettlePos
+					
+					if ($mouseMoved) {
+						$mouseSettledTime = $null
+					} else {
+						if ($null -eq $mouseSettledTime) {
+							$mouseSettledTime = Get-Date
+						} elseif (((Get-Date) - $mouseSettledTime).TotalMilliseconds -ge $mouseSettleMs) {
+							if ($script:DiagEnabled) {
+								"$(Get-Date -Format 'HH:mm:ss.fff') - Loop $($script:LoopIteration): Settled after $settleLoopCount checks, max delta: $maxMoveDelta" | Out-File $script:SettleDiagFile -Append
+							}
+							break
+						}
+					}
+				}
+			}
+			
 			# Determine if we should skip the update based on user input or first run
-			if ($userInputDetected) {
+			if ($script:userInputDetected) {
 				$SkipUpdate = $true
 			} elseif ($isFirstRun) {
 				# Skip automated input on first run
 				$SkipUpdate = $true
-			} elseif ($forceRedraw) {
-				# Force redraw - ensure we don't skip the update
-				$SkipUpdate = $false
-			} else {
-				# Normal update cycle
+			} elseif (-not $forceRedraw) {
+				# Only set skipUpdate to false if we're not forcing a redraw
 				$SkipUpdate = $false
 			}
 			
@@ -6120,21 +6186,7 @@ namespace mJiggAPI {
 			# Check current mouse position to detect user movement (simple approach - only check at end of interval)
 			# Compare end position to start position to detect if user moved mouse during the interval
 			# This is simpler and doesn't interfere with mouse movement like checking during the wait loop
-			# Use direct Windows API call for better performance (avoids .NET stutter)
-			$point = New-Object mJiggAPI.POINT
-			$hasGetCursorPos = [mJiggAPI.Mouse].GetMethod("GetCursorPos") -ne $null
-			if ($hasGetCursorPos) {
-				if ([mJiggAPI.Mouse]::GetCursorPos([ref]$point)) {
-					# Convert POINT to System.Drawing.Point for compatibility
-					$currentPos = New-Object System.Drawing.Point($point.X, $point.Y)
-				} else {
-					# API call failed - skip this check
-					$currentPos = $null
-				}
-			} else {
-				# Method not available - skip this check
-				$currentPos = $null
-			}
+			$currentPos = Get-MousePosition
 			$PosUpdate = $false
 			$x = 0
 			$y = 0
@@ -6144,7 +6196,7 @@ namespace mJiggAPI {
 			# This prevents our own automated movement from being detected as user input
 			$shouldCheckMouseAfterWait = $true
 			if ($null -ne $LastAutomatedMouseMovement) {
-				$timeSinceAutomatedMovement = ((Get-Date) - $LastAutomatedMouseMovement).TotalMilliseconds
+				$timeSinceAutomatedMovement = Get-TimeSinceMs -startTime $LastAutomatedMouseMovement
 				if ($timeSinceAutomatedMovement -lt 300) {
 					# Too soon after our automated movement - skip mouse detection
 					$shouldCheckMouseAfterWait = $false
@@ -6173,7 +6225,7 @@ namespace mJiggAPI {
 							$LastUserInputTime = Get-Date
 						}
 						# Add mouse movement to detected inputs with emoji only
-						$mouseMoveText = "`u{1F400}"
+						$mouseMoveText = [char]::ConvertFromUtf32(0x1F400)
 						if ($intervalMouseInputs -notcontains $mouseMoveText) {
 							$intervalMouseInputs += $mouseMoveText
 						}
@@ -6234,19 +6286,9 @@ namespace mJiggAPI {
 				} else {
 					# No user movement detected - perform automated movement
 					# Get fresh position right before movement to avoid stutter
-					# Try to use direct Windows API call for better performance
-					$point = New-Object mJiggAPI.POINT
-					$hasGetCursorPos = [mJiggAPI.Mouse].GetMethod("GetCursorPos") -ne $null
-					if ($hasGetCursorPos) {
-						if ([mJiggAPI.Mouse]::GetCursorPos([ref]$point)) {
-							# Convert POINT to System.Drawing.Point for compatibility
-							$pos = New-Object System.Drawing.Point($point.X, $point.Y)
-						} else {
-							# API call failed - use last known position
-							$pos = $LastPos
-						}
-					} else {
-						# Method not available - use last known position
+					$pos = Get-MousePosition
+					if ($null -eq $pos) {
+						# API call failed - use last known position
 						$pos = $LastPos
 					}
 					$PosUpdate = $true
@@ -6319,18 +6361,10 @@ namespace mJiggAPI {
 					[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point ($x, $y)
 				}
 				
-				# Use direct Windows API call for better performance (avoids .NET stutter)
-				$point = New-Object mJiggAPI.POINT
-				$hasGetCursorPos = [mJiggAPI.Mouse].GetMethod("GetCursorPos") -ne $null
-				if ($hasGetCursorPos) {
-					if ([mJiggAPI.Mouse]::GetCursorPos([ref]$point)) {
-						# Convert POINT to System.Drawing.Point for compatibility
-						$LastPos = New-Object System.Drawing.Point($point.X, $point.Y)
-					} else {
-						# API call failed - keep existing LastPos
-					}
-				} else {
-					# Method not available - keep existing LastPos
+				# Update last position using cached method for better performance
+				$newPos = Get-MousePosition
+				if ($null -ne $newPos) {
+					$LastPos = $newPos
 				}
 				$automatedMovementPos = $LastPos  # Track this as our automated movement position
 				# Record when we performed this automated mouse movement to prevent it from being detected as user input
@@ -6367,11 +6401,12 @@ namespace mJiggAPI {
 			# Mouse inputs (with emoji) should appear first, then keyboard keys
 			$allInputs = @()
 			# Add mouse movement first if present (it's just the emoji now)
-			$mouseMovement = $intervalMouseInputs | Where-Object { $_ -eq "`u{1F400}" }
+			$mouseEmojiForCompare = [char]::ConvertFromUtf32(0x1F400)
+			$mouseMovement = $intervalMouseInputs | Where-Object { $_ -eq $mouseEmojiForCompare }
 			if ($mouseMovement) {
 				$allInputs += $mouseMovement
 				# Add other mouse inputs (clicks) after movement
-				$otherMouseInputs = $intervalMouseInputs | Where-Object { $_ -ne "`u{1F400}" }
+				$otherMouseInputs = $intervalMouseInputs | Where-Object { $_ -ne $mouseEmojiForCompare }
 				if ($otherMouseInputs) {
 					$allInputs += $otherMouseInputs
 				}
@@ -6412,7 +6447,7 @@ namespace mJiggAPI {
 				
 				# Component 1: Timestamp (full format)
 				$logComponents += @{
-					priority = 1
+					priority = [int]1
 					text = $date.ToString()
 					shortText = $date.ToString("HH:mm:ss")
 				}
@@ -6423,19 +6458,19 @@ namespace mJiggAPI {
 						# Get direction arrow if available
 						$arrowText = if ($directionArrow) { " $directionArrow" } else { "" }
 						$logComponents += @{
-							priority = 2
+							priority = [int]2
 							text = " - Coordinates updated$arrowText"
 							shortText = " - Updated$arrowText"
 						}
 						# Component 3: Coordinates
 						$logComponents += @{
-							priority = 3
+							priority = [int]3
 							text = " x$x/y$y"
 							shortText = " x$x/y$y"
 						}
 					} else {
 						$logComponents += @{
-							priority = 2
+							priority = [int]2
 							text = " - Input detected, skipping update"
 							shortText = " - Input detected"
 						}
@@ -6443,33 +6478,33 @@ namespace mJiggAPI {
 				} elseif ($isFirstRun) {
 					# First run - show initialization message
 					$logComponents += @{
-						priority = 2
+						priority = [int]2
 						text = " - Initialized"
 						shortText = " - Initialized"
 					}
 				} elseif ($keyboardInputDetected -or $mouseInputDetected) {
 					# User input was detected - show user input skip with KB/MS status
 					$logComponents += @{
-						priority = 2
+						priority = [int]2
 						text = " - User input skip"
 						shortText = " - Skipped"
 					}
 				} elseif ($cooldownActive) {
 					# Auto-resume delay is active (no user input detected) - show custom message
 					$logComponents += @{
-						priority = 2
+						priority = [int]2
 						text = " - Auto-Resume Delay"
 						shortText = " - Auto-Resume Delay"
 					}
 					# Add resume timer component
 					$logComponents += @{
-						priority = 4
+						priority = [int]4
 						text = " [Resume: ${secondsRemaining}s]"
 						shortText = " [R: ${secondsRemaining}s]"
 					}
 				} else {
 					$logComponents += @{
-						priority = 2
+						priority = [int]2
 						text = " - User input skip"
 						shortText = " - Skipped"
 					}
@@ -6478,13 +6513,13 @@ namespace mJiggAPI {
 				# Component 4: Wait interval info (only if not cooldown active or user input detected)
 				if ($waitExecuted -and -not $cooldownActive) {
 					$logComponents += @{
-						priority = 4
+						priority = [int]4
 						text = " [Interval:${interval}s]"
 						shortText = " [Interval:${interval}s]"
 					}
 				} elseif (-not $isFirstRun -and -not $cooldownActive) {
 					$logComponents += @{
-						priority = 4
+						priority = [int]4
 						text = " [First run]"
 						shortText = " [First run]"
 					}
@@ -6496,7 +6531,7 @@ namespace mJiggAPI {
 					# Keyboard detection status
 					$kbStatus = if ($keyboardInputDetected) { "YES" } else { "NO" }
 					$logComponents += @{
-						priority = 5
+						priority = [int]5
 						text = " [KB:$kbStatus]"
 						shortText = " [K:" + $kbStatus.Substring(0,1) + "]"
 					}
@@ -6504,7 +6539,7 @@ namespace mJiggAPI {
 					# Mouse detection status
 					$msStatus = if ($mouseInputDetected) { "YES" } else { "NO" }
 					$logComponents += @{
-						priority = 6
+						priority = [int]6
 						text = " [MS:$msStatus]"
 						shortText = " [M:" + $msStatus.Substring(0,1) + "]"
 					}
@@ -6576,14 +6611,7 @@ namespace mJiggAPI {
 			# Output Handling
 			# Skip console updates if mouse movement was recently detected (every 50ms check) to prevent stutter
 			# This prevents blocking console operations from interfering with Windows mouse message processing
-			$skipConsoleUpdate = $false
-			if ($null -ne $script:LastMouseMovementTime) {
-				$timeSinceMouseMovement = ((Get-Date) - $script:LastMouseMovementTime).TotalMilliseconds
-				# Skip console updates for 200ms after mouse movement to prevent stutter
-				if ($timeSinceMouseMovement -lt 200) {
-					$skipConsoleUpdate = $true
-				}
-			}
+			$skipConsoleUpdate = (Get-TimeSinceMs -startTime $script:LastMouseMovementTime) -lt 200
 			# Force UI redraw when forceRedraw is true (e.g., after window resize) - override skipConsoleUpdate
 			if ($forceRedraw) {
 				$skipConsoleUpdate = $false
@@ -6651,32 +6679,44 @@ namespace mJiggAPI {
 						$spacingAfterTimes = [math]::Max(1, $remainingSpace - $spacingBeforeTimes)
 						
 						# Write left part (mJig title)
-						Write-Host "  mJig(" -NoNewline -ForegroundColor Magenta
-						Write-Host "`u{1F400}" -NoNewline -ForegroundColor White
-						Write-Host ")" -NoNewline -ForegroundColor Magenta
+						# Use ConvertFromUtf32 for emoji compatibility across PowerShell versions
+						$mouseEmoji = [char]::ConvertFromUtf32(0x1F400)  # 🐀
+						$hourglassEmoji = [char]::ConvertFromUtf32(0x23F3)  # ⏳
+						Write-Host "  mJig(" -NoNewline -ForegroundColor $script:HeaderAppName
+						$mouseEmojiX = $Host.UI.RawUI.CursorPosition.X
+						Write-Host $mouseEmoji -NoNewline -ForegroundColor $script:HeaderIcon
+						[Console]::SetCursorPosition($mouseEmojiX + 2, $Outputline)
+						Write-Host ")" -NoNewline -ForegroundColor $script:HeaderAppName
 						# Add DEBUGMODE indicator if in debug mode
 						if ($DebugMode) {
-							Write-Host " - DEBUGMODE" -NoNewline -ForegroundColor Red
+							Write-Host " - DEBUGMODE" -NoNewline -ForegroundColor $script:TextError
 						}
 						
 						# Add spacing before times
 						write-host (" " * $spacingBeforeTimes) -NoNewLine
 						
 						# Write times (Current first, then End)
-						Write-Host "Current" -NoNewline -ForegroundColor Yellow
-						Write-Host "`u{23F3}/" -NoNewline -ForegroundColor White
-						Write-Host "$currentTime" -NoNewline -ForegroundColor Green
-						Write-Host " ➣  " -NoNewline
-						Write-Host "End" -NoNewline -ForegroundColor Yellow
-						Write-Host "`u{23F3}/" -NoNewline -ForegroundColor White
-						Write-Host "$endTimeDisplay" -NoNewline -ForegroundColor Green
+						Write-Host "Current" -NoNewline -ForegroundColor $script:HeaderTimeLabel
+						$hourglassX1 = $Host.UI.RawUI.CursorPosition.X
+						Write-Host $hourglassEmoji -NoNewline -ForegroundColor $script:HeaderIcon
+						[Console]::SetCursorPosition($hourglassX1 + 2, $Outputline)
+						Write-Host "/" -NoNewline -ForegroundColor $script:TextDefault
+						Write-Host "$currentTime" -NoNewline -ForegroundColor $script:HeaderTimeValue
+						$arrowTriangle = [char]0x27A3  # ➣
+						Write-Host " $arrowTriangle  " -NoNewline
+						Write-Host "End" -NoNewline -ForegroundColor $script:HeaderTimeLabel
+						$hourglassX2 = $Host.UI.RawUI.CursorPosition.X
+						Write-Host $hourglassEmoji -NoNewline -ForegroundColor $script:HeaderIcon
+						[Console]::SetCursorPosition($hourglassX2 + 2, $Outputline)
+						Write-Host "/" -NoNewline -ForegroundColor $script:TextDefault
+						Write-Host "$endTimeDisplay" -NoNewline -ForegroundColor $script:HeaderTimeValue
 						
 						# Add spacing after times and write view tag aligned to the right
 						write-host (" " * $spacingAfterTimes) -NoNewLine
 						if ($Output -eq "full") {
-							write-host " Full" -ForeGroundColor Magenta -NoNewline
+							write-host " Full" -ForeGroundColor $script:HeaderViewTag -NoNewline
 						} else {
-							write-host " Minimum" -ForeGroundColor Magenta -NoNewline
+							write-host " Minimum" -ForeGroundColor $script:HeaderViewTag -NoNewline
 						}
 						
 						# Add 2 spaces for right margin (view tag should end 2 spaces from right edge)
@@ -6703,7 +6743,7 @@ namespace mJiggAPI {
 					if ($t) {
 						for ($i = $Host.UI.RawUI.CursorPosition.x; $i -lt $HostWidth; $i++) {
 							Write-Host " " -NoNewLine
-							write-host ([string]::new([char]0x2500, ($HostWidth - 2))) -ForegroundColor White -NoNewline
+							write-host ("$($script:BoxHorizontal)" * ($HostWidth - 2)) -ForegroundColor $script:HeaderSeparator -NoNewline
 							for ($i = $Host.UI.RawUI.CursorPosition.x; $i -lt $HostWidth; $i++) {
 								write-host " " -NoNewline
 							}
@@ -6718,7 +6758,7 @@ namespace mJiggAPI {
 				# This prevents stale view calculations when console updates resume after mouse movement
 				$boxWidth = 50  # Width for stats box
 				$boxPadding = 2  # Padding around box (1 space on each side)
-				$verticalSeparatorWidth = 3  # space+pipe+space = 3 characters
+				$verticalSeparatorWidth = 3  # " $($script:BoxVertical) " = 3 characters
 				$showStatsBox = ($Output -eq "full" -and $HostWidth -ge ($boxWidth + $boxPadding + $verticalSeparatorWidth + 50))  # Need at least 50 chars for logs
 				$logWidth = if ($showStatsBox) { $HostWidth - $boxWidth - $boxPadding - $verticalSeparatorWidth } else { $HostWidth }  # Reserve space for box + padding + separator
 				
@@ -6799,7 +6839,9 @@ namespace mJiggAPI {
 							# Build line with priority-based truncation (accounting for 2-space indent)
 							$formattedLine = "  "  # Add 2 leading spaces
 							$remainingWidth = $availableWidth - 2  # Subtract 2 for leading spaces
-							foreach ($component in $LogArray[$i].components | Sort-Object priority) {
+							# Sort components by priority (ascending) - lower priority numbers appear first
+							$sortedComponents = $LogArray[$i].components | Sort-Object { [int]$_.priority }
+							foreach ($component in $sortedComponents) {
 								$componentText = if ($component.priority -eq 1 -and $useShortTimestamp) {
 									$component.shortText
 								} else {
@@ -6832,10 +6874,10 @@ namespace mJiggAPI {
 							
 							# Draw vertical separator (always separate from box, for all rows)
 							if ($showStatsBox) {
-								write-host (" " + [char]0x2502 + " ") -NoNewline -ForegroundColor White
+								write-host " $($script:BoxVertical) " -NoNewline -ForegroundColor $script:StatsBoxBorder
 							}
 							
-							# Draw stats box in full view (with padding so it does not touch white lines)
+							# Draw stats box in full view (with padding so it doesn't touch white lines)
 							if ($showStatsBox) {
 								# Add space before box (so it doesn't touch vertical separator)
 								write-host " " -NoNewline
@@ -6843,62 +6885,62 @@ namespace mJiggAPI {
 								# Draw box content
 								if ($i -eq 0) {
 									# Top border
-									write-host ([char]0x250C) -NoNewline -ForegroundColor Cyan
-									write-host ([string]::new([char]0x2500, ($boxWidth - 2))) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2510) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxTopLeft)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host ("$($script:BoxHorizontal)" * ($boxWidth - 2)) -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "$($script:BoxTopRight)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} elseif ($i -eq 1) {
 									# Header row
 									$boxHeader = "Stats"
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
-									write-host $boxHeader.PadRight($boxWidth - 2) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host $boxHeader.PadRight($boxWidth - 2) -NoNewline -ForegroundColor $script:StatsBoxTitle
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} elseif ($i -eq 2) {
 									# Separator row
-									write-host ([char]0x251C) -NoNewline -ForegroundColor Cyan
-									write-host ([string]::new([char]0x2500, ($boxWidth - 2))) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2524) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVerticalRight)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host ("$($script:BoxHorizontal)" * ($boxWidth - 2)) -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "$($script:BoxVerticalLeft)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} elseif ($i -eq $Rows - 5) {
 									# Fifth to last row - separator before keys (moved up one line)
-									write-host ([char]0x251C) -NoNewline -ForegroundColor Cyan
-									write-host ([string]::new([char]0x2500, ($boxWidth - 2))) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2524) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVerticalRight)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host ("$($script:BoxHorizontal)" * ($boxWidth - 2)) -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "$($script:BoxVerticalLeft)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} elseif ($i -eq $Rows - 4) {
 									# Fourth to last row - show detected keys label (moved up one line)
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
-									write-host "Detected Inputs:".PadRight($boxWidth - 2) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "Detected Inputs:".PadRight($boxWidth - 2) -NoNewline -ForegroundColor $script:StatsBoxTitle
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} elseif ($i -eq $Rows - 3) {
 									# Third to last row - show first line of keys
 									if ($PreviousIntervalKeys.Count -gt 0) {
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
-										write-host $keysFirstLine.PadRight($boxWidth - 2) -NoNewline -ForegroundColor Yellow
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+										write-host $keysFirstLine.PadRight($boxWidth - 2) -NoNewline -ForegroundColor $script:StatsValue
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 									} else {
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
-										write-host "(none)".PadRight($boxWidth - 2) -NoNewline -ForegroundColor DarkGray
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+										write-host "(none)".PadRight($boxWidth - 2) -NoNewline -ForegroundColor $script:TextMuted
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 									}
 								} elseif ($i -eq $Rows - 2) {
 									# Second to last row - show second line of keys if needed
 									if ($PreviousIntervalKeys.Count -gt 0 -and $keysSecondLine -ne "") {
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
-										write-host $keysSecondLine.PadRight($boxWidth - 2) -NoNewline -ForegroundColor Yellow
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+										write-host $keysSecondLine.PadRight($boxWidth - 2) -NoNewline -ForegroundColor $script:StatsValue
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 									} else {
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 										write-host (" " * ($boxWidth - 2)) -NoNewline
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 									}
 								} elseif ($i -eq $Rows - 1) {
 									# Last row - bottom border of box
-									write-host ([char]0x2514) -NoNewline -ForegroundColor Cyan
-									write-host ([string]::new([char]0x2500, ($boxWidth - 2))) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2518) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxBottomLeft)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host ("$($script:BoxHorizontal)" * ($boxWidth - 2)) -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "$($script:BoxBottomRight)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} else {
 									# Empty rows in box
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 									write-host (" " * ($boxWidth - 2)) -NoNewline
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								}
 								
 								# Add space after box (so it doesn't touch right edge)
@@ -6916,7 +6958,7 @@ namespace mJiggAPI {
 							
 							# Draw vertical separator (always separate from box, for all rows)
 							if ($showStatsBox) {
-								write-host (" " + [char]0x2502 + " ") -NoNewline -ForegroundColor White
+								write-host " $($script:BoxVertical) " -NoNewline -ForegroundColor $script:StatsBoxBorder
 							}
 							
 							# Draw stats box in full view (for empty log lines, with padding)
@@ -6924,58 +6966,58 @@ namespace mJiggAPI {
 								# Add space before box (so it doesn't touch vertical separator)
 								write-host " " -NoNewline
 								if ($i -eq 0) {
-									write-host ([char]0x250C) -NoNewline -ForegroundColor Cyan
-									write-host ([string]::new([char]0x2500, ($boxWidth - 2))) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2510) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxTopLeft)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host ("$($script:BoxHorizontal)" * ($boxWidth - 2)) -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "$($script:BoxTopRight)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} elseif ($i -eq 1) {
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
-									write-host "Stats".PadRight($boxWidth - 2) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "Stats".PadRight($boxWidth - 2) -NoNewline -ForegroundColor $script:StatsBoxTitle
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} elseif ($i -eq 2) {
-									write-host ([char]0x251C) -NoNewline -ForegroundColor Cyan
-									write-host ([string]::new([char]0x2500, ($boxWidth - 2))) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2524) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVerticalRight)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host ("$($script:BoxHorizontal)" * ($boxWidth - 2)) -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "$($script:BoxVerticalLeft)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} elseif ($i -eq $Rows - 5) {
 									# Fifth to last row - separator before keys (moved up one line)
-									write-host ([char]0x251C) -NoNewline -ForegroundColor Cyan
-									write-host ([string]::new([char]0x2500, ($boxWidth - 2))) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2524) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVerticalRight)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host ("$($script:BoxHorizontal)" * ($boxWidth - 2)) -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "$($script:BoxVerticalLeft)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} elseif ($i -eq $Rows - 4) {
 									# Fourth to last row - show detected keys label (moved up one line)
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
-									write-host "Detected Inputs:".PadRight($boxWidth - 2) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "Detected Inputs:".PadRight($boxWidth - 2) -NoNewline -ForegroundColor $script:StatsBoxTitle
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} elseif ($i -eq $Rows - 3) {
 									# Third to last row - show first line of keys
 									if ($PreviousIntervalKeys.Count -gt 0) {
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
-										write-host $keysFirstLine.PadRight($boxWidth - 2) -NoNewline -ForegroundColor Yellow
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+										write-host $keysFirstLine.PadRight($boxWidth - 2) -NoNewline -ForegroundColor $script:StatsValue
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 									} else {
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
-										write-host "(none)".PadRight($boxWidth - 2) -NoNewline -ForegroundColor DarkGray
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+										write-host "(none)".PadRight($boxWidth - 2) -NoNewline -ForegroundColor $script:TextMuted
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 									}
 								} elseif ($i -eq $Rows - 2) {
 									# Second to last row - show second line of keys if needed
 									if ($PreviousIntervalKeys.Count -gt 0 -and $keysSecondLine -ne "") {
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
-										write-host $keysSecondLine.PadRight($boxWidth - 2) -NoNewline -ForegroundColor Yellow
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+										write-host $keysSecondLine.PadRight($boxWidth - 2) -NoNewline -ForegroundColor $script:StatsValue
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 									} else {
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 										write-host (" " * ($boxWidth - 2)) -NoNewline
-										write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+										write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 									}
 								} elseif ($i -eq $Rows - 1) {
 									# Last row - bottom border of box
-									write-host ([char]0x2514) -NoNewline -ForegroundColor Cyan
-									write-host ([string]::new([char]0x2500, ($boxWidth - 2))) -NoNewline -ForegroundColor Cyan
-									write-host ([char]0x2518) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxBottomLeft)" -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host ("$($script:BoxHorizontal)" * ($boxWidth - 2)) -NoNewline -ForegroundColor $script:StatsBoxBorder
+									write-host "$($script:BoxBottomRight)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								} else {
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 									write-host (" " * ($boxWidth - 2)) -NoNewline
-									write-host ([char]0x2502) -NoNewline -ForegroundColor Cyan
+									write-host "$($script:BoxVertical)" -NoNewline -ForegroundColor $script:StatsBoxBorder
 								}
 							}
 							
@@ -6992,7 +7034,7 @@ namespace mJiggAPI {
 				# Calculate if we should show stats box (full view, wide enough window)
 				$boxWidth = 50  # Width for stats box
 				$boxPadding = 2  # Padding around box (1 space on each side)
-				$verticalSeparatorWidth = 3  # space+pipe+space = 3 characters
+				$verticalSeparatorWidth = 3  # " $($script:BoxVertical) " = 3 characters
 				$showStatsBox = ($Output -eq "full" -and $HostWidth -ge ($boxWidth + $boxPadding + $verticalSeparatorWidth + 50))  # Need at least 50 chars for logs
 				$logWidth = if ($showStatsBox) { $HostWidth - $boxWidth - $boxPadding - $verticalSeparatorWidth } else { $HostWidth }  # Reserve space for box + padding + separator
 				
@@ -7009,7 +7051,7 @@ namespace mJiggAPI {
 						# Match the pattern from the top separator exactly (one space on each side)
 						for ($i = $Host.UI.RawUI.CursorPosition.x; $i -lt $HostWidth; $i++) {
 							Write-Host " " -NoNewLine
-							write-host ([string]::new([char]0x2500, ($HostWidth - 2))) -ForegroundColor White -NoNewline
+							write-host ("$($script:BoxHorizontal)" * ($HostWidth - 2)) -ForegroundColor $script:HeaderSeparator -NoNewline
 							for ($i = $Host.UI.RawUI.CursorPosition.x; $i -lt $HostWidth; $i++) {
 								write-host " " -NoNewline
 							}
@@ -7040,19 +7082,26 @@ namespace mJiggAPI {
 						}
 						
 						# Build menu items - include modify movement only in full view
+						# Define emoji using ConvertFromUtf32 for cross-version compatibility
+						$emojiHourglass = [char]::ConvertFromUtf32(0x23F3)  # ⏳
+						$emojiRefresh = [char]::ConvertFromUtf32(0x1F441)  # 👁️
+						$emojiLock = [char]::ConvertFromUtf32(0x1F512)  # 🔒
+						$emojiGear = [char]::ConvertFromUtf32(0x1F6E0)  # 🛠
+						$emojiRedX = [char]::ConvertFromUtf32(0x274C)  # ❌
+						
 						$menuItemsList = @(
 							@{
-								full = ([char]0x23F3 + "|" + $timeMenuText)
+								full = "$emojiHourglass|$timeMenuText"
 								noIcons = $timeMenuText
 								short = "(t)ime"
 							},
 							@{
-								full = ([char]::ConvertFromUtf32(0x1F504) + "|toggle_(v)iew")
+								full = "$emojiRefresh|toggle_(v)iew"
 								noIcons = "toggle_(v)iew"
 								short = "(v)iew"
 							},
 							@{
-								full = ([char]::ConvertFromUtf32(0x1F512) + "|(h)ide_output")
+								full = "$emojiLock|(h)ide_output"
 								noIcons = "(h)ide_output"
 								short = "(h)ide"
 							}
@@ -7061,7 +7110,7 @@ namespace mJiggAPI {
 						# Add modify movement only in full view
 						if ($Output -eq "full") {
 							$menuItemsList += @{
-								full = ([char]0x2699 + "|modify_(m)ovement")
+								full = "$emojiGear|modify_(m)ovement"
 								noIcons = "modify_(m)ovement"
 								short = "(m)ove"
 							}
@@ -7069,7 +7118,7 @@ namespace mJiggAPI {
 						
 						# Always add quit at the end
 						$menuItemsList += @{
-							full = ([char]0x274C + "|(q)uit")
+							full = "$emojiRedX|(q)uit"
 							noIcons = "(q)uit"
 							short = "(q)uit"
 						}
@@ -7141,18 +7190,12 @@ namespace mJiggAPI {
 						}
 						
 						# Write menu items
-						write-host "  " -NoNewLine
+						write-host "  " -NoNewLine  # Leading spaces without background
 						
 						# Initialize menu item bounds tracking
-						# IMPORTANT: Always recalculate bounds on every redraw to ensure they match current UI state
-						# Clear any existing bounds to force fresh calculation
 						$script:MenuItemsBounds = @()
-						
-						# Get the ACTUAL cursor position after writing the leading spaces
-						# This ensures Y coordinate matches what's actually rendered
-						$actualCursorPos = $Host.UI.RawUI.CursorPosition
-						$menuY = $actualCursorPos.Y
-						$currentMenuX = $actualCursorPos.X  # Should be 2 after "  ", but use actual position
+						$menuY = $Outputline
+						$currentMenuX = 2  # Start after "  " prefix
 						
 						# Write all items except quit
 						$itemsBeforeQuit = $menuItems.Count - 1
@@ -7170,23 +7213,15 @@ namespace mJiggAPI {
 							}
 							
 							# Calculate item width (accounting for emojis which display as 2 chars)
-							# IMPORTANT: This must match the actual rendered width including emoji, pipe, and all text
 							$itemDisplayWidth = 0
 							if ($menuFormat -eq 0) {
-								# Full format: emoji|text
 								$parts = $itemText -split "\|", 2
 								if ($parts.Count -eq 2) {
 									$emoji = $parts[0]
 									$text = $parts[1]
-									# Emoji displays as 2 chars, pipe as 1 char, text as its string length
-									# Note: text.Length includes parentheses and hotkey letter, all count as 1 char each
-									$itemDisplayWidth = 2 + 1 + $text.Length  # emoji (2) + pipe (1) + text (including parentheses)
-								} else {
-									# Fallback if no pipe found
-									$itemDisplayWidth = $itemText.Length
+									$itemDisplayWidth = 2 + 1 + $text.Length  # emoji (2) + pipe (1) + text
 								}
 							} else {
-								# No-icons or short format: just text (no emoji, no pipe)
 								$itemDisplayWidth = $itemText.Length
 							}
 							
@@ -7197,60 +7232,51 @@ namespace mJiggAPI {
 								if ($parts.Count -eq 2) {
 									$emoji = $parts[0]
 									$text = $parts[1]
-									write-host $emoji -NoNewline
-									write-host "|" -NoNewline -ForegroundColor White
-									# Parse text for colors (look for parentheses with letter inside)
+									$pipeX = $itemStartX + 2  # Emoji takes 2 display columns
+									write-host $emoji -NoNewline -BackgroundColor $script:MenuButtonBg
+									# Check actual cursor position and fill any gap before the pipe
+									$cursorAfterEmoji = $Host.UI.RawUI.CursorPosition.X
+									if ($cursorAfterEmoji -lt $pipeX) {
+										# Emoji only took 1 column, fill the gap
+										write-host (" " * ($pipeX - $cursorAfterEmoji)) -NoNewline -BackgroundColor $script:MenuButtonBg
+									}
+									[Console]::SetCursorPosition($pipeX, $menuY)
+									write-host "|" -NoNewline -ForegroundColor $script:MenuButtonPipe -BackgroundColor $script:MenuButtonBg
+									# Button text with hotkey letter highlighted
 									$textParts = $text -split "([()])"
 									for ($j = 0; $j -lt $textParts.Count; $j++) {
 										$part = $textParts[$j]
-										# Check if this is a hotkey pattern: (letter)
 										if ($part -eq "(" -and $j + 2 -lt $textParts.Count -and $textParts[$j + 1] -match "^[a-z]$" -and $textParts[$j + 2] -eq ")") {
-											# Hotkey letter - parentheses green, letter yellow
-											write-host "(" -NoNewline -ForegroundColor Green
-											write-host $textParts[$j + 1] -NoNewline -ForegroundColor Yellow
-											write-host ")" -NoNewline -ForegroundColor Green
-											$j += 2  # Skip the letter and closing paren
+											write-host "(" -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
+											write-host $textParts[$j + 1] -NoNewline -ForegroundColor $script:MenuButtonHotkey -BackgroundColor $script:MenuButtonBg
+											write-host ")" -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
+											$j += 2
 										} elseif ($part -ne "") {
-											# Regular text
-											write-host $part -NoNewline -ForegroundColor Green
+											write-host $part -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
 										}
 									}
 								}
 							} else {
-								# No-icons or short format: just text
-								# Parse text for colors (look for parentheses with letter inside)
+								# No-icons or short format: text with hotkey letter highlighted
 								$textParts = $itemText -split "([()])"
 								for ($j = 0; $j -lt $textParts.Count; $j++) {
 									$part = $textParts[$j]
-									# Check if this is a hotkey pattern: (letter)
 									if ($part -eq "(" -and $j + 2 -lt $textParts.Count -and $textParts[$j + 1] -match "^[a-z]$" -and $textParts[$j + 2] -eq ")") {
-										# Hotkey letter - parentheses green, letter yellow
-										write-host "(" -NoNewline -ForegroundColor Green
-										write-host $textParts[$j + 1] -NoNewline -ForegroundColor Yellow
-										write-host ")" -NoNewline -ForegroundColor Green
-										$j += 2  # Skip the letter and closing paren
+										write-host "(" -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
+										write-host $textParts[$j + 1] -NoNewline -ForegroundColor $script:MenuButtonHotkey -BackgroundColor $script:MenuButtonBg
+										write-host ")" -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
+										$j += 2
 									} elseif ($part -ne "") {
-										# Regular text
-										write-host $part -NoNewline -ForegroundColor Green
+										write-host $part -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
 									}
 								}
 							}
 							
-							# Store menu item bounds
-							# IMPORTANT: Use actual cursor position to ensure bounds match rendered position
-							# Get cursor position AFTER writing the item to get accurate end position
-							$actualEndPos = $Host.UI.RawUI.CursorPosition
-							$itemEndX = $actualEndPos.X - 1  # Cursor is at position after last char, so subtract 1
-							
-							# Fallback: If cursor position seems wrong, use calculated width
-							if ($itemEndX -lt $itemStartX) {
-								$itemEndX = $itemStartX + $itemDisplayWidth - 1
-							}
-							
+							# Store menu item bounds - use actual cursor position for accuracy with emojis
+							$itemEndX = $Host.UI.RawUI.CursorPosition.X - 1
 							# Extract hotkey from item (look for pattern like "(t)" in the text)
 							$hotkeyMatch = $itemText -match "\(([a-z])\)"
 							$hotkey = if ($hotkeyMatch) { $matches[1] } else { $null }
-							
 							$script:MenuItemsBounds += @{
 								startX = $itemStartX
 								endX = $itemEndX
@@ -7259,20 +7285,19 @@ namespace mJiggAPI {
 								index = $i
 							}
 							
-							# Update current X position based on actual cursor position
-							$currentMenuX = $actualEndPos.X
+							# Update current X position - use actual cursor position
+							$currentMenuX = $Host.UI.RawUI.CursorPosition.X
 							
-							# Add spacing between items
+							# Add spacing between items (no background)
 							if ($menuFormat -eq 2) {
 								# Short format: use single space
 								write-host " " -NoNewline
+								$currentMenuX += 1
 							} else {
 								# Full or no-icons format: use two spaces
 								write-host "  " -NoNewline
+								$currentMenuX += 2
 							}
-							
-							# Update currentMenuX to match actual cursor position after spacing
-							$currentMenuX = $Host.UI.RawUI.CursorPosition.X
 						}
 						
 						# Add spacing before quit (only for format 0 and 1)
@@ -7280,9 +7305,6 @@ namespace mJiggAPI {
 							write-host (" " * $spacing) -NoNewLine
 							$currentMenuX += $spacing
 						}
-						
-						# Update currentMenuX to match actual cursor position after spacing
-						$currentMenuX = $Host.UI.RawUI.CursorPosition.X
 						
 						# Write quit item (last item)
 						$quitItem = $menuItems[$menuItems.Count - 1]
@@ -7296,23 +7318,15 @@ namespace mJiggAPI {
 						}
 						
 						# Calculate quit item width
-						# IMPORTANT: This must match the actual rendered width including emoji, pipe, and all text
 						$quitDisplayWidth = 0
 						if ($menuFormat -eq 0) {
-							# Full format: emoji|text
 							$parts = $itemText -split "\|", 2
 							if ($parts.Count -eq 2) {
 								$emoji = $parts[0]
 								$text = $parts[1]
-								# Emoji displays as 2 chars, pipe as 1 char, text as its string length
-								# Note: text.Length includes parentheses and hotkey letter, all count as 1 char each
-								$quitDisplayWidth = 2 + 1 + $text.Length  # emoji (2) + pipe (1) + text (including parentheses)
-							} else {
-								# Fallback if no pipe found
-								$quitDisplayWidth = $itemText.Length
+								$quitDisplayWidth = 2 + 1 + $text.Length  # emoji (2) + pipe (1) + text
 							}
 						} else {
-							# No-icons or short format: just text (no emoji, no pipe)
 							$quitDisplayWidth = $itemText.Length
 						}
 						
@@ -7323,55 +7337,48 @@ namespace mJiggAPI {
 							if ($parts.Count -eq 2) {
 								$emoji = $parts[0]
 								$text = $parts[1]
-								write-host $emoji -NoNewline
-								write-host "|" -NoNewline -ForegroundColor White
-								# Parse text for colors (look for parentheses with letter inside)
+								$pipeX = $quitStartX + 2  # Emoji takes 2 display columns
+								write-host $emoji -NoNewline -BackgroundColor $script:MenuButtonBg
+								# Check actual cursor position and fill any gap before the pipe
+								$cursorAfterEmoji = $Host.UI.RawUI.CursorPosition.X
+								if ($cursorAfterEmoji -lt $pipeX) {
+									# Emoji only took 1 column, fill the gap
+									write-host (" " * ($pipeX - $cursorAfterEmoji)) -NoNewline -BackgroundColor $script:MenuButtonBg
+								}
+								[Console]::SetCursorPosition($pipeX, $menuY)
+								write-host "|" -NoNewline -ForegroundColor $script:MenuButtonPipe -BackgroundColor $script:MenuButtonBg
+								# Button text with hotkey letter highlighted
 								$textParts = $text -split "([()])"
 								for ($j = 0; $j -lt $textParts.Count; $j++) {
 									$part = $textParts[$j]
-									# Check if this is a hotkey pattern: (letter)
 									if ($part -eq "(" -and $j + 2 -lt $textParts.Count -and $textParts[$j + 1] -match "^[a-z]$" -and $textParts[$j + 2] -eq ")") {
-										# Hotkey letter - parentheses green, letter yellow
-										write-host "(" -NoNewline -ForegroundColor Green
-										write-host $textParts[$j + 1] -NoNewline -ForegroundColor Yellow
-										write-host ")" -NoNewline -ForegroundColor Green
-										$j += 2  # Skip the letter and closing paren
+										write-host "(" -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
+										write-host $textParts[$j + 1] -NoNewline -ForegroundColor $script:MenuButtonHotkey -BackgroundColor $script:MenuButtonBg
+										write-host ")" -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
+										$j += 2
 									} elseif ($part -ne "") {
-										# Regular text
-										write-host $part -NoNewline -ForegroundColor Green
+										write-host $part -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
 									}
 								}
 							}
 						} else {
-							# No-icons or short format: just text
-							# Parse text for colors (look for parentheses with letter inside)
+							# No-icons or short format: text with hotkey letter highlighted
 							$textParts = $itemText -split "([()])"
 							for ($j = 0; $j -lt $textParts.Count; $j++) {
 								$part = $textParts[$j]
-								# Check if this is a hotkey pattern: (letter)
 								if ($part -eq "(" -and $j + 2 -lt $textParts.Count -and $textParts[$j + 1] -match "^[a-z]$" -and $textParts[$j + 2] -eq ")") {
-									# Hotkey letter - parentheses green, letter yellow
-									write-host "(" -NoNewline -ForegroundColor Green
-									write-host $textParts[$j + 1] -NoNewline -ForegroundColor Yellow
-									write-host ")" -NoNewline -ForegroundColor Green
-									$j += 2  # Skip the letter and closing paren
+									write-host "(" -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
+									write-host $textParts[$j + 1] -NoNewline -ForegroundColor $script:MenuButtonHotkey -BackgroundColor $script:MenuButtonBg
+									write-host ")" -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
+									$j += 2
 								} elseif ($part -ne "") {
-									# Regular text
-									write-host $part -NoNewline -ForegroundColor Green
+									write-host $part -NoNewline -ForegroundColor $script:MenuButtonText -BackgroundColor $script:MenuButtonBg
 								}
 							}
 						}
 						
-						# Store quit item bounds
-						# IMPORTANT: Use actual cursor position to ensure bounds match rendered position
-						$actualQuitEndPos = $Host.UI.RawUI.CursorPosition
-						$quitEndX = $actualQuitEndPos.X - 1  # Cursor is at position after last char, so subtract 1
-						
-						# Fallback: If cursor position seems wrong, use calculated width
-						if ($quitEndX -lt $quitStartX) {
-							$quitEndX = $quitStartX + $quitDisplayWidth - 1
-						}
-						
+						# Store quit item bounds - use actual cursor position for accuracy with emojis
+						$quitEndX = $Host.UI.RawUI.CursorPosition.X - 1
 						$quitHotkeyMatch = $itemText -match "\(([a-z])\)"
 						$quitHotkey = if ($quitHotkeyMatch) { $matches[1] } else { $null }
 						$script:MenuItemsBounds += @{
@@ -7382,10 +7389,10 @@ namespace mJiggAPI {
 							index = $menuItems.Count - 1
 						}
 						
-						# Add 2 spaces for right margin
-						write-host "  " -NoNewline
+						# Add right margin
+						write-host "  " -NoNewline  # Trailing spaces without background
 						
-						# Clear any remaining characters on the line to ensure proper display
+						# Clear any remaining characters on the line (no background)
 						$currentX = $Host.UI.RawUI.CursorPosition.x
 						if ($currentX -lt $HostWidth) {
 							for ($i = $currentX; $i -lt $HostWidth; $i++) {
@@ -7429,27 +7436,40 @@ namespace mJiggAPI {
 			}
 			# If skipConsoleUpdate is true and Output is not "hidden", don't render anything (prevents stutter)
 			
+			# Reset resize cleared screen flag after we've completed a redraw
+			# This ensures the screen will be cleared again if user starts a new resize
+			if ($forceRedraw -and -not $skipConsoleUpdate) {
+				$ResizeClearedScreen = $false
+			}
+			
 			# Check if end time reached (only if end time is set)
+			# Compare full MMddHHmm values to handle overnight runs correctly
 			if ($endTimeInt -ne -1 -and -not [string]::IsNullOrEmpty($end)) {
-				$current = Get-Date -Format "MMddHHmm"
-				if ($current -ge $end) {
-					$time = $true
+				try {
+					$currentDateTimeInt = [int]($date.ToString("MMddHHmm"))
+					$endDateTimeInt = [int]$end
+					if ($currentDateTimeInt -ge $endDateTimeInt) {
+						$time = $true
+					}
+				} catch {
+					# If comparison fails, don't stop the script
 				}
 			}
+			
+			# Only break if time is explicitly set to true
+			if ($time -eq $true) {
+				# End message
+				if ($Output -ne "hidden") {
+					[Console]::SetCursorPosition(0, $Outputline)
+					Write-Host "       END TIME REACHED: " -NoNewline -ForegroundColor $script:TextError
+					Write-Host "Stopping " -NoNewline
+					Write-Host "mJig"
+					write-host
+				}
+				break
 			}
-			}  # end process body - keeps :process open until break
-			if ($time -eq $true) { break }
-		}  # end :process
-		
-		# End message
-		if ($Output -ne "hidden") {
-			[Console]::SetCursorPosition(0, $Outputline)
-			Write-Host "       END TIME REACHED: " -NoNewline -ForegroundColor Red
-			Write-Host "Stopping " -NoNewline
-			Write-Host "mJig"
-		write-host
-	}
+		} # end :process
+}
 
 # Uncomment the line below to run the function when script is executed directly
-
 # Start-mJig -Output full
