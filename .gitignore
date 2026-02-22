@@ -1,2 +1,4 @@
-_diag/
+Layer 2: Remove the key name resolve_diag
 *.bak*
+_parsecheck.ps1
+_diag/
