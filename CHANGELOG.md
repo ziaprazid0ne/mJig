@@ -6,7 +6,19 @@ All notable changes to `start-mjig.ps1` are documented in this file.
 
 ## [Latest] - Unreleased
 
-Changes since last commit (4ddbfc2 - "Evidence-based input detection, security hardening, scroll/mouse hook removal"):
+Changes since last commit (cee9bf8 - "VT100 flicker-free rendering, clickable buttons via PeekConsoleInput, buffered frame output"):
+
+### Fixed
+- **User mouse movement ignored during automated movement animation** - The movement animation loop (`SetCursorPos` across path points) ran to completion without checking for user mouse input, effectively hijacking the cursor for 300-700ms. Now checks actual cursor position after each animation step; if the cursor has drifted >3px from where it was placed (indicating user movement), the animation aborts immediately. On abort: `$script:userInputDetected` and `$mouseInputDetected` are set, the simulated keypress is skipped, `$PosUpdate` is cleared, and the auto-resume delay timer is started (if configured). Diagnostic logging writes abort details to `_diag/settle.txt` when `-Diag` is enabled.
+
+---
+
+## [cee9bf8] - 2026-02-22
+
+### Commit Message
+"VT100 flicker-free rendering, clickable buttons via PeekConsoleInput, buffered frame output"
+
+Changes since commit 4ddbfc2 ("Evidence-based input detection, security hardening, scroll/mouse hook removal"):
 
 ### Added
 - `$script:MenuClickHotkey` - Script-scoped variable for menu click hotkey (was previously used but never initialized)

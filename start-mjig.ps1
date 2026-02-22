@@ -2629,13 +2629,13 @@ namespace mJiggAPI {
 			Write-Buffer -X $x -Y ($y + 16) -Text "$($script:BoxVertical)" -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
 			Write-Buffer -Text " " -BG $script:MoveDialogBg
 			Write-Buffer -X $checkmarkX -Y ($y + 16) -Text $checkmark -FG $script:TextSuccess -BG $script:MoveDialogButtonBg -Wide
-		Write-Buffer -X ($checkmarkX + 2) -Y ($y + 16) -Text "|" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
-		Write-Buffer -Text "(" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
-		Write-Buffer -Text "u" -FG $script:MoveDialogButtonHotkey -BG $script:MoveDialogButtonBg
-		Write-Buffer -Text ")pdate" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
-		Write-Buffer -Text "  " -BG $script:MoveDialogBg
-		Write-Buffer -X $redXX -Y ($y + 16) -Text $redX -FG $script:TextError -BG $script:MoveDialogButtonBg -Wide
-		Write-Buffer -X ($redXX + 2) -Y ($y + 16) -Text "|" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
+			Write-Buffer -X ($checkmarkX + 2) -Y ($y + 16) -Text "|" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
+			Write-Buffer -Text "(" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
+			Write-Buffer -Text "u" -FG $script:MoveDialogButtonHotkey -BG $script:MoveDialogButtonBg
+			Write-Buffer -Text ")pdate" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
+			Write-Buffer -Text "  " -BG $script:MoveDialogBg
+			Write-Buffer -X $redXX -Y ($y + 16) -Text $redX -FG $script:TextError -BG $script:MoveDialogButtonBg -Wide
+			Write-Buffer -X ($redXX + 2) -Y ($y + 16) -Text "|" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
 			Write-Buffer -Text "(" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
 			Write-Buffer -Text "c" -FG $script:MoveDialogButtonHotkey -BG $script:MoveDialogButtonBg
 			Write-Buffer -Text ")ancel" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
@@ -5031,6 +5031,7 @@ namespace mJiggAPI {
 				$LastMovementDurationMs = $movementPath.TotalTimeMs
 				
 				# Move through each point smoothly
+				$movementAborted = $false
 				if ($movementPoints.Count -gt 1) {
 					$timePerPoint = $LastMovementDurationMs / ($movementPoints.Count - 1)
 					
@@ -5048,6 +5049,33 @@ namespace mJiggAPI {
 						if ($i -lt $movementPoints.Count - 1) {
 							$sleepTime = [Math]::Max(1, [Math]::Round($timePerPoint))
 							Start-Sleep -Milliseconds $sleepTime
+							
+							# Check if user moved the mouse during animation by comparing
+							# actual cursor position to where we just placed it
+							$actualPos = Get-MousePosition
+							if ($null -ne $actualPos) {
+								$driftX = [Math]::Abs($actualPos.X - $point.X)
+								$driftY = [Math]::Abs($actualPos.Y - $point.Y)
+								if ($driftX -gt 3 -or $driftY -gt 3) {
+									$movementAborted = $true
+									$SkipUpdate = $true
+									$script:userInputDetected = $true
+									$mouseInputDetected = $true
+									$mouseMoveText = "Mouse"
+									if ($intervalMouseInputs -notcontains $mouseMoveText) {
+										$intervalMouseInputs += $mouseMoveText
+									}
+									if ($script:AutoResumeDelaySeconds -gt 0) {
+										$LastUserInputTime = Get-Date
+									}
+									$LastPos = $actualPos
+									$automatedMovementPos = $null
+									if ($script:DiagEnabled) {
+										"$(Get-Date -Format 'HH:mm:ss.fff') - Loop $($script:LoopIteration): Movement aborted at step $i/$($movementPoints.Count) - user moved mouse (drift: $driftX,$driftY)" | Out-File $script:SettleDiagFile -Append
+									}
+									break
+								}
+							}
 						}
 					}
 				} else {
@@ -5055,39 +5083,37 @@ namespace mJiggAPI {
 					[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point ($x, $y)
 				}
 				
-				# Update last position using cached method for better performance
-				$newPos = Get-MousePosition
-				if ($null -ne $newPos) {
-					$LastPos = $newPos
-				}
-				$automatedMovementPos = $LastPos  # Track this as our automated movement position
-				# Record when we performed this automated mouse movement to prevent it from being detected as user input
-				$LastAutomatedMouseMovement = Get-Date
-				
-				# Send Right Alt key press (modifier key - won't type anything or interfere with apps)
-				# This is needed for apps like Slack/Skype that check for keyboard activity
-				# Using Right Alt specifically to avoid conflicts with Left Alt shortcuts
-				try {
-					$vkCode = [byte]0xA5  # VK_RMENU (Right Alt)
-					[mJiggAPI.Keyboard]::keybd_event($vkCode, [byte]0, [uint32]0, [int]0)  # Key down
-					Start-Sleep -Milliseconds 10
-					[mJiggAPI.Keyboard]::keybd_event($vkCode, [byte]0, [uint32]0x0002, [int]0)  # Key up (KEYEVENTF_KEYUP = 0x0002)
-					# Record when we sent this simulated key press to prevent it from being detected as user input
-					$LastSimulatedKeyPress = Get-Date
-					Start-Sleep -Milliseconds 50  # Small delay to let key state clear
-					# Flush any simulated key events from the console input buffer
-					# so they aren't mistaken for user keyboard input on the next check
+				if ($movementAborted) {
+					$PosUpdate = $false
+				} else {
+					# Update last position using cached method for better performance
+					$newPos = Get-MousePosition
+					if ($null -ne $newPos) {
+						$LastPos = $newPos
+					}
+					$automatedMovementPos = $LastPos
+					$LastAutomatedMouseMovement = Get-Date
+					
+					# Send Right Alt key press (modifier key - won't type anything or interfere with apps)
 					try {
-						$hStdIn = [mJiggAPI.Mouse]::GetStdHandle(-10)
-						$flushBuf = New-Object 'mJiggAPI.INPUT_RECORD[]' 32
-						$flushCount = [uint32]0
-						if ([mJiggAPI.Mouse]::PeekConsoleInput($hStdIn, $flushBuf, 32, [ref]$flushCount) -and $flushCount -gt 0) {
-							[mJiggAPI.Mouse]::ReadConsoleInput($hStdIn, $flushBuf, $flushCount, [ref]$flushCount) | Out-Null
-						}
-					} catch { }
-				} catch {
-					# If keybd_event fails, continue without keyboard input
-					# Mouse movement alone should still work for most cases
+						$vkCode = [byte]0xA5  # VK_RMENU (Right Alt)
+						[mJiggAPI.Keyboard]::keybd_event($vkCode, [byte]0, [uint32]0, [int]0)  # Key down
+						Start-Sleep -Milliseconds 10
+						[mJiggAPI.Keyboard]::keybd_event($vkCode, [byte]0, [uint32]0x0002, [int]0)  # Key up (KEYEVENTF_KEYUP = 0x0002)
+						$LastSimulatedKeyPress = Get-Date
+						Start-Sleep -Milliseconds 50
+						# Flush any simulated key events from the console input buffer
+						try {
+							$hStdIn = [mJiggAPI.Mouse]::GetStdHandle(-10)
+							$flushBuf = New-Object 'mJiggAPI.INPUT_RECORD[]' 32
+							$flushCount = [uint32]0
+							if ([mJiggAPI.Mouse]::PeekConsoleInput($hStdIn, $flushBuf, 32, [ref]$flushCount) -and $flushCount -gt 0) {
+								[mJiggAPI.Mouse]::ReadConsoleInput($hStdIn, $flushBuf, $flushCount, [ref]$flushCount) | Out-Null
+							}
+						} catch { }
+					} catch {
+						# If keybd_event fails, continue without keyboard input
+					}
 				}
 				
 					$LastMovementTime = Get-Date
