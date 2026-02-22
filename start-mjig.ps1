@@ -1,84 +1,3 @@
-# Helper function to get key name from key code
-function Get-KeyName {
-	param([int]$keyCode)
-	
-	# Common virtual key codes to names mapping
-	$KeyMap = @{
-		0x08 = "Backspace"; 0x09 = "Tab"; 0x0C = "Clear"; 0x0D = "Enter"
-		0x10 = "Shift"; 0x11 = "Ctrl"; 0x12 = "Alt"; 0x13 = "Pause"
-		0x14 = "CapsLock"; 0x1B = "Esc"; 0x20 = "Space"; 0x21 = "PageUp"
-		0x22 = "PageDown"; 0x23 = "End"; 0x24 = "Home"; 0x25 = "Left"
-		0x26 = "Up"; 0x27 = "Right"; 0x28 = "Down"; 0x2C = "PrintScreen"
-		0x2D = "Insert"; 0x2E = "Delete"; 0x5B = "LWin"; 0x5C = "RWin"
-		0x5D = "Apps"; 0x5F = "Sleep"; 0x70 = "F1"; 0x71 = "F2"
-		0x72 = "F3"; 0x73 = "F4"; 0x74 = "F5"; 0x75 = "F6"
-		0x76 = "F7"; 0x77 = "F8"; 0x78 = "F9"; 0x79 = "F10"
-		0x7A = "F11"; 0x7B = "F12"; 0x7C = "F13"; 0x7D = "F14"
-		0x7E = "F15"; 0x7F = "F16"; 0x80 = "F17"; 0x81 = "F18"
-		0x82 = "F19"; 0x83 = "F20"; 0x84 = "F21"; 0x85 = "F22"
-		0x86 = "F23"; 0x87 = "F24"; 0x90 = "NumLock"; 0x91 = "ScrollLock"
-		0xA0 = "LShift"; 0xA1 = "RShift"; 0xA2 = "LCtrl"; 0xA3 = "RCtrl"
-		0xA4 = "LAlt"; 0xA5 = "RAlt"; 0xA6 = "BrowserBack"; 0xA7 = "BrowserForward"
-		0xA8 = "BrowserRefresh"; 0xA9 = "BrowserStop"; 0xAA = "BrowserSearch"
-		0xAB = "BrowserFavorites"; 0xAC = "BrowserHome"; 0xAD = "VolumeMute"
-		0xAE = "VolumeDown"; 0xAF = "VolumeUp"; 0xB0 = "MediaNext"
-		0xB1 = "MediaPrev"; 0xB2 = "MediaStop"; 0xB3 = "MediaPlay"
-		0xB4 = "LaunchMail"; 0xB5 = "LaunchMedia"; 0xB6 = "LaunchApp1"
-		0xB7 = "LaunchApp2"; 0xBA = ";"; 0xBB = "="; 0xBC = ","
-		0xBD = "-"; 0xBE = "."; 0xBF = "/"; 0xC0 = "Backtick"
-		0xDB = "["; 0xDC = "Backslash"; 0xDD = "]"; 0xDE = "Quote"
-	}
-	
-	# Check if we have a mapped name
-	if ($KeyMap.ContainsKey($keyCode)) {
-		return $KeyMap[$keyCode]
-	}
-	
-	# For alphanumeric keys (0x30-0x39 for 0-9, 0x41-0x5A for A-Z)
-	if ($keyCode -ge 0x30 -and $keyCode -le 0x39) {
-		return [char]($keyCode)
-	}
-	if ($keyCode -ge 0x41 -and $keyCode -le 0x5A) {
-		return [char]($keyCode)
-	}
-	
-	# For numpad keys (0x60-0x69 for 0-9, 0x6A-0x6F for operators)
-	if ($keyCode -ge 0x60 -and $keyCode -le 0x69) {
-		return "Num" + [char]($keyCode - 0x30)
-	}
-	if ($keyCode -eq 0x6A) { return "Num*" }
-	if ($keyCode -eq 0x6B) { return "Num+" }
-	if ($keyCode -eq 0x6C) { return "NumEnter" }
-	if ($keyCode -eq 0x6D) { return "Num-" }
-	if ($keyCode -eq 0x6E) { return "Num." }
-	if ($keyCode -eq 0x6F) { return "Num/" }
-	
-	# Additional common keys that might be missing
-	# Mouse buttons are sometimes reported as keys (0x01-0x06)
-	if ($keyCode -eq 0x01) { return "LButton" }
-	if ($keyCode -eq 0x02) { return "RButton" }
-	if ($keyCode -eq 0x04) { return "MButton" }
-	if ($keyCode -eq 0x05) { return "XButton1" }
-	if ($keyCode -eq 0x06) { return "XButton2" }
-	
-	# Try to get key name using Windows Forms Keys enum as fallback
-	try {
-		Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-		$keysEnum = [System.Windows.Forms.Keys]
-		if ([Enum]::IsDefined($keysEnum, $keyCode)) {
-			$keyName = [Enum]::GetName($keysEnum, $keyCode)
-			if ($keyName) {
-				return $keyName
-			}
-		}
-	} catch {
-		# If we can't use the enum, continue to return null
-	}
-	
-	# Unknown key
-	return $null
-}
-
 function Start-mJig {
 
 	#############################################################
@@ -179,9 +98,8 @@ function Start-mJig {
 	$LastSimulatedKeyPress = $null  # Track when we last sent a simulated key press
 	$LastAutomatedMouseMovement = $null  # Track when we last performed automated mouse movement
 	$LastUserInputTime = $null  # Track when user input was last detected (for auto-resume delay timer)
-	$PressedKeys = @{}  # Track currently pressed keys for display
+
 	$PreviousIntervalKeys = @()  # Track keys pressed in previous interval for display
-	$PreviousMouseWheelDelta = 0  # Track mouse wheel position for scroll detection
 	$LastResizeDetection = $null  # Track when we last detected a resize
 	$PendingResize = $null  # Track pending resize to throttle redraws
 	$ResizeThrottleMs = 1500  # Wait 2000ms after window stops resizing before processing resize
@@ -278,7 +196,7 @@ function Start-mJig {
 	$script:ResizeBoxBorder = "White"
 	$script:ResizeLogoName = "Magenta"
 	$script:ResizeLogoIcon = "White"
-	$script:ResizeQuoteText = "DarkGray"
+	$script:ResizeQuoteText = "White"
 	
 	# General UI
 	$script:TextDefault = "White"
@@ -686,16 +604,22 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 		# Diagnostics - initialize folder and file paths
 		$script:DiagEnabled = $Diag
 		if ($script:DiagEnabled) {
-			$script:DiagFolder = Join-Path $env:TEMP "mjig_diag"
+			$script:DiagFolder = Join-Path $PSScriptRoot "_diag"
 			if (-not (Test-Path $script:DiagFolder)) {
 				New-Item -ItemType Directory -Path $script:DiagFolder -Force | Out-Null
 			}
 			$script:StartupDiagFile = Join-Path $script:DiagFolder "startup.txt"
 			$script:SettleDiagFile = Join-Path $script:DiagFolder "settle.txt"
+			$script:InputDiagFile = Join-Path $script:DiagFolder "input.txt"
 			
-			"$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 1: Starting initialization" | Out-File $script:StartupDiagFile
+			$diagTimestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+			"=== mJig Startup Diag: $diagTimestamp ===" | Out-File $script:StartupDiagFile
+			"$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 1: Starting initialization" | Out-File $script:StartupDiagFile -Append
 			"  Diag enabled, folder: $script:DiagFolder" | Out-File $script:StartupDiagFile -Append
-			"$(Get-Date -Format 'HH:mm:ss.fff') - Settle diagnostics started" | Out-File $script:SettleDiagFile
+			"=== mJig Settle Diag: $diagTimestamp ===" | Out-File $script:SettleDiagFile
+			"$(Get-Date -Format 'HH:mm:ss.fff') - Settle diagnostics started" | Out-File $script:SettleDiagFile -Append
+			"=== mJig Input Diag: $diagTimestamp ===" | Out-File $script:InputDiagFile
+			"$(Get-Date -Format 'HH:mm:ss.fff') - Input diagnostics started (PeekConsoleInput + GetLastInputInfo)" | Out-File $script:InputDiagFile -Append
 		}
 		
 		if ($DebugMode) {
@@ -729,7 +653,6 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 			# Use a safer method to check if types exist without throwing errors
 			$existingKeyboard = $null
 			$existingMouse = $null
-			$existingMouseHook = $null
 			
 			# Try to get the types using Get-Type or by checking if they're loaded
 			$allTypes = [System.AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetTypes() } | Where-Object { $_.Namespace -eq 'mJiggAPI' }
@@ -737,7 +660,6 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 			foreach ($type in $allTypes) {
 				if ($type.Name -eq 'Keyboard') { $existingKeyboard = $type }
 				if ($type.Name -eq 'Mouse') { $existingMouse = $type }
-				if ($type.Name -eq 'MouseHook') { $existingMouseHook = $type }
 			}
 			
 			if ($null -ne $existingMouse) {
@@ -819,12 +741,24 @@ namespace mJiggAPI {
 		public uint dwEventFlags;
 	}
 	
+	[StructLayout(LayoutKind.Sequential)]
+	public struct KEY_EVENT_RECORD {
+		public int bKeyDown;
+		public ushort wRepeatCount;
+		public ushort wVirtualKeyCode;
+		public ushort wVirtualScanCode;
+		public char UnicodeChar;
+		public uint dwControlKeyState;
+	}
+	
 	[StructLayout(LayoutKind.Explicit)]
 	public struct INPUT_RECORD {
 		[FieldOffset(0)]
 		public ushort EventType;
 		[FieldOffset(4)]
 		public MOUSE_EVENT_RECORD MouseEvent;
+		[FieldOffset(4)]
+		public KEY_EVENT_RECORD KeyEvent;
 	}
 	
 	[StructLayout(LayoutKind.Sequential)]
@@ -841,10 +775,13 @@ namespace mJiggAPI {
 		public short Bottom;
 	}
 	
+	[StructLayout(LayoutKind.Sequential)]
+	public struct LASTINPUTINFO {
+		public uint cbSize;
+		public uint dwTime;
+	}
+	
 	public class Keyboard {
-		[DllImport("user32.dll")]
-		public static extern short GetAsyncKeyState(int vKey);
-		
 		[DllImport("user32.dll", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
 		public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
 		
@@ -877,6 +814,12 @@ namespace mJiggAPI {
 		
 		[DllImport("user32.dll")]
 		public static extern IntPtr GetForegroundWindow();
+		
+		[DllImport("user32.dll")]
+		public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+		
+		[DllImport("kernel32.dll")]
+		public static extern ulong GetTickCount64();
 		
 		[DllImport("kernel32.dll")]
 		public static extern bool GetConsoleScreenBufferInfo(IntPtr hConsoleOutput, out CONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo);
@@ -991,121 +934,12 @@ namespace mJiggAPI {
 		public const uint MOUSE_LEFT_BUTTON_UP = 0x0002;
 		public const uint DOUBLE_CLICK = 0x0002;
 		
-		// For mouse wheel detection, we use GetAsyncKeyState with VK codes
-		// Note: Mouse wheel doesn't have VK codes, so we need to use a hook
-		// For now, we'll check for wheel button state changes
-	}
-	
-	public class MouseHook {
-		[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-		public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
-		
-		[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-		[return: MarshalAs(UnmanagedType.Bool)]
-		public static extern bool UnhookWindowsHookEx(IntPtr hhk);
-		
-		[DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-		public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-		
-		[DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-		public static extern IntPtr GetModuleHandle(string lpModuleName);
-		
-		[DllImport("user32.dll")]
-		public static extern bool PeekMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
-		
-		[StructLayout(LayoutKind.Sequential)]
-		public struct MSG {
-			public IntPtr hwnd;
-			public uint message;
-			public IntPtr wParam;
-			public IntPtr lParam;
-			public uint time;
-			public POINT pt;
-		}
-		
-		[StructLayout(LayoutKind.Sequential)]
-		public struct MSLLHOOKSTRUCT {
-			public POINT pt;
-			public uint mouseData;
-			public uint flags;
-			public uint time;
-			public IntPtr dwExtraInfo;
-		}
-		
-		public const uint PM_REMOVE = 0x0001;
-		public const uint PM_NOREMOVE = 0x0000;
-		
-		public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
-		
-		public const int WH_MOUSE_LL = 14;
-		public const int WM_MOUSEWHEEL = 0x020A;
-		public const int WM_MOUSEHWHEEL = 0x020E;
-		
-		public static IntPtr hHook = IntPtr.Zero;
-		public static LowLevelMouseProc proc = HookCallback;
-		public static int lastWheelDelta = 0;
-		
-		public static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
-			if (nCode >= 0) {
-				int msg = wParam.ToInt32();
-				if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) {
-					try {
-						// Mouse wheel event detected
-						// Use Marshal.PtrToStructure to properly read MSLLHOOKSTRUCT
-						// This is more reliable than manual offset reading
-						MSLLHOOKSTRUCT mouseHookStruct = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
-						// Delta is in the high 16 bits of mouseData, sign-extended
-						int delta = (short)((mouseHookStruct.mouseData >> 16) & 0xFFFF);
-						lastWheelDelta += delta;  // Accumulate delta
-					} catch {
-						// If structure reading fails, try manual offset as fallback
-						try {
-							int mouseData = Marshal.ReadInt32(lParam, 8);
-							int delta = (short)((mouseData >> 16) & 0xFFFF);
-							lastWheelDelta += delta;
-						} catch {
-							// Both methods failed, skip this event
-						}
-					}
-				}
-			}
-			return CallNextHookEx(hHook, nCode, wParam, lParam);
-		}
-		
-		public static void InstallHook() {
-			if (hHook == IntPtr.Zero) {
-				// For low-level hooks (WH_MOUSE_LL), we can use GetModuleHandle(null) 
-				// which gets the handle for the current process. This works fine for
-				// low-level hooks and avoids dependencies on System.Diagnostics.Process
-				IntPtr hMod = GetModuleHandle(null);
-				hHook = SetWindowsHookEx(WH_MOUSE_LL, proc, hMod, 0);
-			}
-		}
-		
-		public static void ProcessMessages() {
-			// Process Windows messages to ensure hook callback is invoked
-			// For low-level hooks, this isn't strictly necessary, but it helps
-			MSG msg;
-			int count = 0;
-			while (PeekMessage(out msg, IntPtr.Zero, 0, 0, PM_REMOVE) && count < 10) {
-				// Process a few messages - low-level hooks are called directly by Windows
-				count++;
-			}
-		}
-		
-		public static void UninstallHook() {
-			if (hHook != IntPtr.Zero) {
-				UnhookWindowsHookEx(hHook);
-				hHook = IntPtr.Zero;
-			}
-		}
 	}
 }
 "@
 				
 				# Add-Type with explicit error handling and assembly references
 				# Note: We use our own POINT struct, so we don't need System.Drawing.dll
-				# We also avoid System.Diagnostics.Process by using GetModuleHandle(null)
 				$addTypeResult = $null
 				$addTypeError = $null
 				try {
@@ -1140,7 +974,6 @@ namespace mJiggAPI {
 				# Try both reflection and direct type access
 				$loadedKeyboard = $null
 				$loadedMouse = $null
-				$loadedMouseHook = $null
 				
 				# First try direct type access (most reliable)
 				try {
@@ -1157,21 +990,13 @@ namespace mJiggAPI {
 					# Type not accessible directly, try reflection
 				}
 				
-				try {
-					$testType = [mJiggAPI.MouseHook]
-					$loadedMouseHook = $testType
-				} catch {
-					# Type not accessible directly, try reflection
-				}
-				
 				# If direct access failed, try reflection
-				if ($null -eq $loadedKeyboard -or $null -eq $loadedMouse -or $null -eq $loadedMouseHook) {
+				if ($null -eq $loadedKeyboard -or $null -eq $loadedMouse) {
 					try {
 						$allTypes = [System.AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetTypes() } | Where-Object { $_.Namespace -eq 'mJiggAPI' }
 						foreach ($type in $allTypes) {
 							if ($type.Name -eq 'Keyboard' -and $null -eq $loadedKeyboard) { $loadedKeyboard = $type }
 							if ($type.Name -eq 'Mouse' -and $null -eq $loadedMouse) { $loadedMouse = $type }
-							if ($type.Name -eq 'MouseHook' -and $null -eq $loadedMouseHook) { $loadedMouseHook = $type }
 						}
 					} catch {
 						if ($DebugMode) {
@@ -1180,14 +1005,14 @@ namespace mJiggAPI {
 					}
 				}
 				
-				# Check if we have all three types
-				if ($null -ne $loadedKeyboard -and $null -ne $loadedMouse -and $null -ne $loadedMouseHook) {
+				# Check if we have both types
+				if ($null -ne $loadedKeyboard -and $null -ne $loadedMouse) {
 					if ($DebugMode) {
-						Write-Host "  [OK] All types verified: Keyboard, Mouse, MouseHook" -ForegroundColor $script:TextSuccess
+						Write-Host "  [OK] All types verified: Keyboard, Mouse" -ForegroundColor $script:TextSuccess
 					}
 				} else {
 					# Types weren't loaded - check if they already exist from previous check
-					if ($null -ne $existingKeyboard -and $null -ne $existingMouse -and $null -ne $existingMouseHook) {
+					if ($null -ne $existingKeyboard -and $null -ne $existingMouse) {
 						if ($DebugMode) {
 							Write-Host "  [INFO] Types already exist from previous run" -ForegroundColor Gray
 						}
@@ -1199,7 +1024,7 @@ namespace mJiggAPI {
 								$allAssemblies = [System.AppDomain]::CurrentDomain.GetAssemblies()
 								foreach ($assembly in $allAssemblies) {
 									try {
-										$types = $assembly.GetTypes() | Where-Object { $_.Name -in @('Keyboard', 'Mouse', 'MouseHook') }
+										$types = $assembly.GetTypes() | Where-Object { $_.Name -in @('Keyboard', 'Mouse') }
 										if ($types) {
 											Write-Host "    Found types in $($assembly.FullName): $($types | ForEach-Object { $_.FullName } | Join-String -Separator ', ')" -ForegroundColor Gray
 										}
@@ -1216,7 +1041,6 @@ namespace mJiggAPI {
 						$missingTypes = @()
 						if ($null -eq $loadedKeyboard) { $missingTypes += "Keyboard" }
 						if ($null -eq $loadedMouse) { $missingTypes += "Mouse" }
-						if ($null -eq $loadedMouseHook) { $missingTypes += "MouseHook" }
 						$errorMsg = "Failed to load required mJiggAPI types: $($missingTypes -join ', ')"
 						if ($addTypeError) {
 							$errorMsg += "`nAdd-Type error: $($addTypeError.Exception.Message)"
@@ -1231,19 +1055,17 @@ namespace mJiggAPI {
 				# Final fallback - check if types exist anyway
 				$finalKeyboard = $null
 				$finalMouse = $null
-				$finalMouseHook = $null
 				try {
 					$allTypes = [System.AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetTypes() } | Where-Object { $_.Namespace -eq 'mJiggAPI' }
 					foreach ($type in $allTypes) {
 						if ($type.Name -eq 'Keyboard') { $finalKeyboard = $type }
 						if ($type.Name -eq 'Mouse') { $finalMouse = $type }
-						if ($type.Name -eq 'MouseHook') { $finalMouseHook = $type }
 					}
 				} catch {
 					# Ignore errors when checking for existing types
 				}
 				
-				if ($null -ne $finalKeyboard -and $null -ne $finalMouse -and $null -ne $finalMouseHook) {
+				if ($null -ne $finalKeyboard -and $null -ne $finalMouse) {
 					if ($DebugMode) {
 						Write-Host "  [INFO] Types found after error recovery" -ForegroundColor Gray
 					}
@@ -1260,7 +1082,7 @@ namespace mJiggAPI {
 		# Verify types loaded correctly
 		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 2: Types loaded, verifying" | Out-File $script:StartupDiagFile -Append }
 		try {
-			$testKey = [mJiggAPI.Keyboard]::GetAsyncKeyState(0x01)
+			$testKey = [mJiggAPI.Mouse]::GetAsyncKeyState(0x01)
 			$testPoint = New-Object mJiggAPI.POINT
 			$hasGetCursorPos = [mJiggAPI.Mouse].GetMethod("GetCursorPos") -ne $null
 			if ($hasGetCursorPos) {
@@ -1350,32 +1172,6 @@ namespace mJiggAPI {
 			}
 		}
 
-		# Initialize mouse wheel hook for scroll detection
-		if ($DebugMode) {
-			Write-Host "[DEBUG] Initializing mouse wheel hook..." -ForegroundColor $script:TextHighlight
-		}
-		try {
-			[mJiggAPI.MouseHook]::InstallHook()
-			# Verify hook was installed
-			if ([mJiggAPI.MouseHook]::hHook -eq [IntPtr]::Zero) {
-				# Hook installation failed - low-level hooks may not work in PowerShell
-				# This is expected as WH_MOUSE_LL requires the hook procedure to be in a DLL
-				if ($DebugMode) {
-					Write-Host "  [WARN] Mouse wheel hook: Not available (requires DLL)" -ForegroundColor $script:TextWarning
-				}
-			} else {
-				if ($DebugMode) {
-					Write-Host "  [OK] Mouse wheel hook: Installed successfully" -ForegroundColor $script:TextSuccess
-				}
-			}
-		} catch {
-			# Hook initialization failed, wheel detection will be disabled
-			# Silently continue - wheel detection is optional
-			if ($DebugMode) {
-				Write-Host "  [FAIL] Mouse wheel hook: Failed to install - $($_.Exception.Message)" -ForegroundColor $script:TextError
-			}
-		}
-		
 		# Initialize lastPos for mouse detection
 		if ($DebugMode) {
 			Write-Host "[DEBUG] Initializing mouse position tracking..." -ForegroundColor $script:TextHighlight
@@ -2074,7 +1870,7 @@ namespace mJiggAPI {
 					}
 					
 					$leftMouseButtonCode = 0x01
-					$currentKeyState = [mJiggAPI.Keyboard]::GetAsyncKeyState($leftMouseButtonCode)
+					$currentKeyState = [mJiggAPI.Mouse]::GetAsyncKeyState($leftMouseButtonCode)
 					$isCurrentlyPressed = (($currentKeyState -band 0x8000) -ne 0)
 					$wasJustPressed = (($currentKeyState -band 0x0001) -ne 0)
 					$wasPreviouslyPressed = if ($script:previousKeyStates.ContainsKey($leftMouseButtonCode)) { $script:previousKeyStates[$leftMouseButtonCode] } else { $false }
@@ -3487,7 +3283,7 @@ namespace mJiggAPI {
 					}
 					
 					$leftMouseButtonCode = 0x01
-					$currentKeyState = [mJiggAPI.Keyboard]::GetAsyncKeyState($leftMouseButtonCode)
+					$currentKeyState = [mJiggAPI.Mouse]::GetAsyncKeyState($leftMouseButtonCode)
 					$isCurrentlyPressed = (($currentKeyState -band 0x8000) -ne 0)
 					$wasJustPressed = (($currentKeyState -band 0x0001) -ne 0)
 					$wasPreviouslyPressed = if ($script:previousKeyStates.ContainsKey($leftMouseButtonCode)) { $script:previousKeyStates[$leftMouseButtonCode] } else { $false }
@@ -4010,7 +3806,7 @@ namespace mJiggAPI {
 					$VK_RSHIFT = 0xA1  # Right Shift virtual key code
 					$isShiftPressed = $false
 					try {
-						$shiftState = [mJiggAPI.Keyboard]::GetAsyncKeyState($VK_LSHIFT) -bor [mJiggAPI.Keyboard]::GetAsyncKeyState($VK_RSHIFT)
+						$shiftState = [mJiggAPI.Mouse]::GetAsyncKeyState($VK_LSHIFT) -bor [mJiggAPI.Mouse]::GetAsyncKeyState($VK_RSHIFT)
 						$isShiftPressed = (($shiftState -band 0x8000) -ne 0)
 					} catch {
 						# Fallback to ControlKeyState if API call fails
@@ -4539,74 +4335,50 @@ namespace mJiggAPI {
 		
 		if ($DebugMode) {
 			if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - ENTERED DEBUG MODE KEY WAIT LOOP" | Out-File $script:StartupDiagFile -Append }
+
 			Write-Host "`nPress any key to start mJig..." -ForegroundColor $script:TextWarning
 			
 			$keyPressed = $false
 			
-			# VK codes for Ctrl (to filter out Ctrl-only keys)
 			$VK_LCONTROL = 0xA2
 			$VK_RCONTROL = 0xA3
 			
 			while (-not $keyPressed) {
-				# Process Windows messages to ensure smooth mouse movement
-				try {
-					if ([mJiggAPI.MouseHook]::hHook -ne [IntPtr]::Zero) {
-						[mJiggAPI.MouseHook]::ProcessMessages()
-					}
-				} catch {
-					# Ignore errors - hook might not be installed
-				}
-				
-				# Check Ctrl state - if Ctrl is pressed alone, skip ALL key processing
-				# This prevents Ctrl from triggering continuation
 				$ctrlPressedAlone = $false
 				try {
-					$ctrlState = [mJiggAPI.Keyboard]::GetAsyncKeyState($VK_LCONTROL) -bor [mJiggAPI.Keyboard]::GetAsyncKeyState($VK_RCONTROL)
+					$ctrlState = [mJiggAPI.Mouse]::GetAsyncKeyState($VK_LCONTROL) -bor [mJiggAPI.Mouse]::GetAsyncKeyState($VK_RCONTROL)
 					$ctrlPressed = (($ctrlState -band 0x8000) -ne 0)
 					if ($ctrlPressed) {
 						$ctrlPressedAlone = $true
 					}
-				} catch {
-					# Ignore errors
-				}
+				} catch {}
 				
-				# If Ctrl is pressed alone, skip ALL key reading and continue loop
 				if ($ctrlPressedAlone) {
 					Start-Sleep -Milliseconds 50
 					continue
 				}
 				
-				# Use ReadKey but filter Ctrl-only keys
-				# Consume Ctrl-only keys until we get a valid key
 				try {
-					# Check if any key is available
 					if ($Host.UI.RawUI.KeyAvailable) {
-						# Read keys until we get a non-Ctrl-only key
 						$validKeyFound = $false
 						while ($Host.UI.RawUI.KeyAvailable -and -not $validKeyFound) {
 							$keyInfo = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown,AllowCtrlC")
-							# Only process key DOWN events
 							$isKeyDown = if ($null -ne $keyInfo.KeyDown) { $keyInfo.KeyDown } else { $true }
-							# Filter out Ctrl-only keys
 							$isCtrlOnly = ($keyInfo.Key -eq "LeftCtrl" -or $keyInfo.Key -eq "RightCtrl")
 							
 							if ($isKeyDown -and -not $isCtrlOnly) {
 								$keyPressed = $true
 								$validKeyFound = $true
 							}
-							# If it was Ctrl-only or key-up, continue reading next key
 						}
 					} else {
-						# No key available, sleep briefly
 						Start-Sleep -Milliseconds 50
 					}
 				} catch {
-					# Ignore read errors
 					Start-Sleep -Milliseconds 50
 				}
 			}
-			# Don't clear the debug output - let user read it
-			# Clear-Host is called later when the main loop starts rendering
+
 		}
 
 		# Note: Previously had code here to clear key buffer, but $Host.UI.RawUI.KeyAvailable 
@@ -4622,11 +4394,11 @@ namespace mJiggAPI {
 			# Reset state for this iteration
 			$time = $false
 			$script:userInputDetected = $false
-			$keyboardInputDetected = $false  # Track keyboard input separately
-			$mouseInputDetected = $false     # Track mouse input separately
+			$keyboardInputDetected = $false
+			$mouseInputDetected = $false
+			$scrollDetectedInInterval = $false
 			$waitExecuted = $false
-			$intervalKeys = @()  # Track keys pressed during this interval
-			$intervalMouseInputs = @()  # Track mouse inputs (clicks and movement) separately
+			$intervalMouseInputs = @()
 			$interval = 0
 			$math = 0
 			$date = Get-Date
@@ -4691,67 +4463,133 @@ namespace mJiggAPI {
 						}
 						try {
 							$currentCheckPos = Get-MousePosition
+							if ($script:DiagEnabled -and $null -ne $currentCheckPos) {
+								$lastX = if ($null -ne $script:lastMousePosCheck) { $script:lastMousePosCheck.X } else { "null" }
+								$lastY = if ($null -ne $script:lastMousePosCheck) { $script:lastMousePosCheck.Y } else { "null" }
+								$moved = Test-MouseMoved -currentPos $currentCheckPos -lastPos $script:lastMousePosCheck -threshold 2
+								"$(Get-Date -Format 'HH:mm:ss.fff') - MOUSEPOS cur=($($currentCheckPos.X),$($currentCheckPos.Y)) last=($lastX,$lastY) moved=$moved" | Out-File $script:InputDiagFile -Append
+							}
 							if ($null -ne $currentCheckPos) {
 								if (Test-MouseMoved -currentPos $currentCheckPos -lastPos $script:lastMousePosCheck -threshold 2) {
 									$script:LastMouseMovementTime = Get-Date
 									$mouseInputDetected = $true
+									$mouseMoveText = "Mouse"
+									if ($intervalMouseInputs -notcontains $mouseMoveText) {
+										$intervalMouseInputs += $mouseMoveText
+									}
 									if ($script:AutoResumeDelaySeconds -gt 0) {
 										$LastUserInputTime = Get-Date
 									}
 								}
 								$script:lastMousePosCheck = $currentCheckPos
+							} elseif ($script:DiagEnabled) {
+								"$(Get-Date -Format 'HH:mm:ss.fff') - MOUSEPOS: Get-MousePosition returned NULL" | Out-File $script:InputDiagFile -Append
 							}
 						} catch {
-							# Ignore errors in mouse position checking
+							if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - MOUSEPOS ERROR: $($_.Exception.Message)" | Out-File $script:InputDiagFile -Append }
 						}
 						
-						# Skip expensive keyboard scanning if mouse is actively moving
-						# This prevents stutter by avoiding GetAsyncKeyState calls during mouse movement
-						$mouseRecentlyMoving = ($null -ne $script:LastMouseMovementTime) -and ((Get-TimeSinceMs -startTime $script:LastMouseMovementTime) -lt 200)
-						
-						# Track all pressed keys for display (only when Output is "full" and mouse not moving)
-						if ($Output -eq "full" -and -not $mouseRecentlyMoving) {
-							for ($keyCode = 0; $keyCode -le 255; $keyCode++) {
-								if ($keyCode -eq 0xA5) { continue }  # Skip Right Alt
-								$currentKeyState = [mJiggAPI.Keyboard]::GetAsyncKeyState($keyCode)
-								$isCurrentlyPressed = (($currentKeyState -band 0x8000) -ne 0)
-								if ($isCurrentlyPressed) {
-									$keyName = Get-KeyName -keyCode $keyCode
-									if ($keyName) {
-										$PressedKeys[$keyCode] = $keyName
-									} else {
-										$PressedKeys[$keyCode] = "Unknown(0x$($keyCode.ToString('X2')))"
+						# Detect scroll wheel AND keyboard via PeekConsoleInput (works when console is focused)
+						# Keyboard events are only peeked (not consumed) so the menu hotkey handler can still read them
+						$scrollDetected = $false
+						try {
+							$peekBuffer = New-Object 'mJiggAPI.INPUT_RECORD[]' 32
+							$peekEvents = [uint32]0
+							$hStdIn = [mJiggAPI.Mouse]::GetStdHandle(-10)  # STD_INPUT_HANDLE
+							if ([mJiggAPI.Mouse]::PeekConsoleInput($hStdIn, $peekBuffer, 32, [ref]$peekEvents) -and $peekEvents -gt 0) {
+								$hasScrollEvent = $false
+								$hasKeyboardEvent = $false
+								$lastScrollIdx = -1
+								for ($e = 0; $e -lt $peekEvents; $e++) {
+									if ($peekBuffer[$e].EventType -eq 0x0002 -and $peekBuffer[$e].MouseEvent.dwEventFlags -eq 0x0004) {
+										$hasScrollEvent = $true
+										$lastScrollIdx = $e
 									}
-								} else {
-									if ($PressedKeys.ContainsKey($keyCode)) {
-										$PressedKeys.Remove($keyCode)
+									if ($peekBuffer[$e].EventType -eq 0x0001 -and $peekBuffer[$e].KeyEvent.wVirtualKeyCode -ne 0xA5) {
+										$hasKeyboardEvent = $true
+									}
+								}
+								if ($hasScrollEvent) {
+									$scrollDetected = $true
+									$scrollDetectedInInterval = $true
+									$otherText = "Scroll/Other"
+									if ($intervalMouseInputs -notcontains $otherText) {
+										$intervalMouseInputs += $otherText
+									}
+									$mouseInputDetected = $true
+									$script:userInputDetected = $true
+									if ($script:AutoResumeDelaySeconds -gt 0) {
+										$LastUserInputTime = Get-Date
+									}
+									# Only consume scroll events to prevent buffer buildup
+									$consumeCount = [uint32]($lastScrollIdx + 1)
+									$flushBuffer = New-Object 'mJiggAPI.INPUT_RECORD[]' $consumeCount
+									$flushed = [uint32]0
+									[mJiggAPI.Mouse]::ReadConsoleInput($hStdIn, $flushBuffer, $consumeCount, [ref]$flushed) | Out-Null
+									if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - PeekConsoleInput: scroll detected (events=$peekEvents, consumed=$consumeCount)" | Out-File $script:InputDiagFile -Append }
+								}
+								if ($hasKeyboardEvent) {
+									$keyboardInputDetected = $true
+									$script:userInputDetected = $true
+									if ($script:AutoResumeDelaySeconds -gt 0) {
+										$LastUserInputTime = Get-Date
+									}
+									if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - PeekConsoleInput: keyboard detected (events=$peekEvents)" | Out-File $script:InputDiagFile -Append }
+								}
+							}
+						} catch {
+							if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - PeekConsoleInput ERROR: $($_.Exception.Message)" | Out-File $script:InputDiagFile -Append }
+						}
+						
+						# Detect user input via GetLastInputInfo (system-wide, passive)
+						# Keyboard and scroll are evidence-based (PeekConsoleInput).
+						# If GetLastInputInfo sees activity that wasn't classified as keyboard or scroll,
+						# it's almost certainly mouse movement.
+						try {
+							$lii = New-Object mJiggAPI.LASTINPUTINFO
+							$lii.cbSize = [uint32][System.Runtime.InteropServices.Marshal]::SizeOf([type][mJiggAPI.LASTINPUTINFO])
+							$liiResult = [mJiggAPI.Mouse]::GetLastInputInfo([ref]$lii)
+							if ($liiResult) {
+								$tickNow = [uint64][mJiggAPI.Mouse]::GetTickCount64()
+								$lastInputTick = [uint64]$lii.dwTime
+								$systemIdleMs = $tickNow - $lastInputTick
+								$recentSimulated = ($null -ne $LastSimulatedKeyPress) -and ((Get-TimeSinceMs -startTime $LastSimulatedKeyPress) -lt 500)
+								$recentAutoMove = ($null -ne $LastAutomatedMouseMovement) -and ((Get-TimeSinceMs -startTime $LastAutomatedMouseMovement) -lt 500)
+								if ($script:DiagEnabled) {
+									$ts = Get-Date -Format 'HH:mm:ss.fff'
+									"$ts - LII idleMs=$systemIdleMs simFilter=$recentSimulated autoFilter=$recentAutoMove kbDet=$keyboardInputDetected msDet=$mouseInputDetected scrollInt=$scrollDetectedInInterval" | Out-File $script:InputDiagFile -Append
+								}
+								if ($systemIdleMs -lt 300 -and -not $recentSimulated -and -not $recentAutoMove) {
+									$script:userInputDetected = $true
+									if ($script:AutoResumeDelaySeconds -gt 0) {
+										$LastUserInputTime = Get-Date
+									}
+									if (-not $keyboardInputDetected -and -not $scrollDetectedInInterval -and -not $mouseInputDetected) {
+										$mouseInputDetected = $true
+										$script:LastMouseMovementTime = Get-Date
+										$mouseMoveText = "Mouse"
+										if ($intervalMouseInputs -notcontains $mouseMoveText) {
+											$intervalMouseInputs += $mouseMoveText
+										}
+										if ($script:DiagEnabled) { "  >> userInput=TRUE idleMs=$systemIdleMs -> mouse (no kb/scroll/click evidence)" | Out-File $script:InputDiagFile -Append }
+									} else {
+										if ($script:DiagEnabled) { "  >> userInput=TRUE idleMs=$systemIdleMs (already classified: kb=$keyboardInputDetected ms=$mouseInputDetected scroll=$scrollDetectedInInterval)" | Out-File $script:InputDiagFile -Append }
 									}
 								}
 							}
+						} catch {
+							if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - GetLastInputInfo ERROR: $($_.Exception.Message)" | Out-File $script:InputDiagFile -Append }
 						}
 						
-						# Check for key press transitions (for user input detection)
-						# Skip if mouse is actively moving to prevent stutter
-						if ($mouseRecentlyMoving) {
-							# Still check for sleep key presses, but skip the expensive full scan
-							Start-Sleep -Milliseconds 50
-							if ($x -ge $math) { break waitLoop }
-							continue
-						}
-						
-						for ($keyCode = 0; $keyCode -le 255; $keyCode++) {
-							if ($keyCode -eq 0xA5) { continue }  # Skip Right Alt
+						# Check mouse buttons only (0x01-0x06) for click detection
+						for ($keyCode = 0x01; $keyCode -le 0x06; $keyCode++) {
+							if ($keyCode -eq 0x03) { continue }  # 0x03 is VK_CANCEL, not a mouse button
+							$currentKeyState = [mJiggAPI.Mouse]::GetAsyncKeyState($keyCode)
+							$isCurrentlyPressed = (($currentKeyState -band 0x8000) -ne 0)
+							$wasJustPressed = (($currentKeyState -band 0x0001) -ne 0)
+							$wasPreviouslyPressed = if ($script:previousKeyStates.ContainsKey($keyCode)) { $script:previousKeyStates[$keyCode] } else { $false }
 							
-							# Check mouse buttons (only actual mouse button codes: 0x01-0x06)
-							# 0x01 = LButton, 0x02 = RButton, 0x04 = MButton, 0x05 = XButton1, 0x06 = XButton2
-							# Note: 0x07-0x0F are NOT mouse buttons (they're keys like Backspace, Tab, etc.)
-							if ($keyCode -ge 0x01 -and $keyCode -le 0x06) {
-								$currentKeyState = [mJiggAPI.Keyboard]::GetAsyncKeyState($keyCode)
-								$isCurrentlyPressed = (($currentKeyState -band 0x8000) -ne 0)
-								$wasJustPressed = (($currentKeyState -band 0x0001) -ne 0)
-								$wasPreviouslyPressed = if ($script:previousKeyStates.ContainsKey($keyCode)) { $script:previousKeyStates[$keyCode] } else { $false }
-								
-								if ($wasJustPressed -or ($isCurrentlyPressed -and -not $wasPreviouslyPressed)) {
+							if ($wasJustPressed -or ($isCurrentlyPressed -and -not $wasPreviouslyPressed)) {
 									# Left mouse button clicked - check if it's on a menu item or dialog button
 									# Debounce: Only log clicks if we haven't logged one in the last 300ms
 									# Also check if mouse is currently moving - if so, skip logging entirely
@@ -5173,17 +5011,12 @@ namespace mJiggAPI {
 									# The log will appear when mouse movement delay expires (handled by skipConsoleUpdate logic)
 								}
 									
-									$mouseButtonName = Get-KeyName -keyCode $keyCode
-									if (-not $mouseButtonName) {
-										if ($keyCode -eq 0x07) { $mouseButtonName = "XButton3" }
-										elseif ($keyCode -eq 0x08) { $mouseButtonName = "XButton4" }
-										elseif ($keyCode -eq 0x09) { $mouseButtonName = "XButton5" }
-										elseif ($keyCode -eq 0x0A) { $mouseButtonName = "XButton6" }
-										elseif ($keyCode -eq 0x0B) { $mouseButtonName = "XButton7" }
-										elseif ($keyCode -eq 0x0C) { $mouseButtonName = "XButton8" }
-										elseif ($keyCode -eq 0x0D) { $mouseButtonName = "XButton9" }
-										elseif ($keyCode -eq 0x0E) { $mouseButtonName = "XButton10" }
-										elseif ($keyCode -eq 0x0F) { $mouseButtonName = "XButton11" }
+									$mouseButtonName = switch ($keyCode) {
+										0x01 { "LButton" }
+										0x02 { "RButton" }
+										0x04 { "MButton" }
+										0x05 { "XButton1" }
+										0x06 { "XButton2" }
 									}
 									if ($mouseButtonName -and $intervalMouseInputs -notcontains $mouseButtonName) {
 										$intervalMouseInputs += $mouseButtonName
@@ -5194,39 +5027,6 @@ namespace mJiggAPI {
 										}
 									}
 								}
-								$script:previousKeyStates[$keyCode] = $isCurrentlyPressed
-								continue
-							}
-							
-							# Check keyboard keys
-							$currentKeyState = [mJiggAPI.Keyboard]::GetAsyncKeyState($keyCode)
-							$isCurrentlyPressed = (($currentKeyState -band 0x8000) -ne 0)
-							$wasJustPressed = (($currentKeyState -band 0x0001) -ne 0)
-							$wasPreviouslyPressed = if ($script:previousKeyStates.ContainsKey($keyCode)) { $script:previousKeyStates[$keyCode] } else { $false }
-							
-							if ($wasJustPressed -or ($isCurrentlyPressed -and -not $wasPreviouslyPressed)) {
-								$keyName = Get-KeyName -keyCode $keyCode
-								$keyAdded = $false
-								if ($keyName) {
-									if ($intervalKeys -notcontains $keyName) {
-										$intervalKeys += $keyName
-										$keyAdded = $true
-									}
-								} else {
-									$unknownKeyName = "Unknown(0x$($keyCode.ToString('X2')))"
-									if ($intervalKeys -notcontains $unknownKeyName) {
-										$intervalKeys += $unknownKeyName
-										$keyAdded = $true
-									}
-								}
-								if ($keyAdded) {
-									$script:userInputDetected = $true
-									$keyboardInputDetected = $true
-									if ($script:AutoResumeDelaySeconds -gt 0) {
-										$LastUserInputTime = Get-Date
-									}
-								}
-							}
 							$script:previousKeyStates[$keyCode] = $isCurrentlyPressed
 						}
 					}
@@ -5891,33 +5691,35 @@ namespace mJiggAPI {
 			# Keyboard and mouse input checking is now done every 200ms in the wait loop above
 			# This provides more reliable detection compared to checking once per interval
 			
-			# Check for mouse wheel scrolling
+			# Safety net: detect user input via GetLastInputInfo after wait loop.
+			# Same inference as wait-loop: unclassified activity → mouse movement.
 			try {
-				if ([mJiggAPI.MouseHook]::hHook -ne [IntPtr]::Zero) {
-					[mJiggAPI.MouseHook]::ProcessMessages()
-					$currentWheelDelta = [mJiggAPI.MouseHook]::lastWheelDelta
-					if ($currentWheelDelta -ne $PreviousMouseWheelDelta) {
-						$deltaChange = $currentWheelDelta - $PreviousMouseWheelDelta
-						if ($deltaChange -gt 0) {
-							$wheelText = "Scroll Up"
-							if ($intervalMouseInputs -notcontains $wheelText) {
-								$intervalMouseInputs += $wheelText
-								$script:userInputDetected = $true
-								$mouseInputDetected = $true
-							}
-						} elseif ($deltaChange -lt 0) {
-							$wheelText = "Scroll Down"
-							if ($intervalMouseInputs -notcontains $wheelText) {
-								$intervalMouseInputs += $wheelText
-								$script:userInputDetected = $true
-								$mouseInputDetected = $true
+				$lii = New-Object mJiggAPI.LASTINPUTINFO
+				$lii.cbSize = [uint32][System.Runtime.InteropServices.Marshal]::SizeOf([type][mJiggAPI.LASTINPUTINFO])
+				if ([mJiggAPI.Mouse]::GetLastInputInfo([ref]$lii)) {
+					$tickNow = [uint64][mJiggAPI.Mouse]::GetTickCount64()
+					$lastInputTick = [uint64]$lii.dwTime
+					$systemIdleMs = $tickNow - $lastInputTick
+					$recentSimulated = ($null -ne $LastSimulatedKeyPress) -and ((Get-TimeSinceMs -startTime $LastSimulatedKeyPress) -lt 500)
+					$recentAutoMove = ($null -ne $LastAutomatedMouseMovement) -and ((Get-TimeSinceMs -startTime $LastAutomatedMouseMovement) -lt 500)
+
+					if ($systemIdleMs -lt 300 -and -not $recentSimulated -and -not $recentAutoMove) {
+						$script:userInputDetected = $true
+						if ($script:AutoResumeDelaySeconds -gt 0) {
+							$LastUserInputTime = Get-Date
+						}
+						if (-not $keyboardInputDetected -and -not $scrollDetectedInInterval -and -not $mouseInputDetected) {
+							$mouseInputDetected = $true
+							$script:LastMouseMovementTime = Get-Date
+							$mouseMoveText = "Mouse"
+							if ($intervalMouseInputs -notcontains $mouseMoveText) {
+								$intervalMouseInputs += $mouseMoveText
 							}
 						}
-						$PreviousMouseWheelDelta = $currentWheelDelta
 					}
 				}
 			} catch {
-				# Hook not available, skip
+				# GetLastInputInfo not available, skip
 			}
 			
 			# Check for window size changes (also check outside wait loop)
@@ -6224,8 +6026,7 @@ namespace mJiggAPI {
 						if ($script:AutoResumeDelaySeconds -gt 0) {
 							$LastUserInputTime = Get-Date
 						}
-						# Add mouse movement to detected inputs with emoji only
-						$mouseMoveText = [char]::ConvertFromUtf32(0x1F400)
+						$mouseMoveText = "Mouse"
 						if ($intervalMouseInputs -notcontains $mouseMoveText) {
 							$intervalMouseInputs += $mouseMoveText
 						}
@@ -6381,6 +6182,16 @@ namespace mJiggAPI {
 					# Record when we sent this simulated key press to prevent it from being detected as user input
 					$LastSimulatedKeyPress = Get-Date
 					Start-Sleep -Milliseconds 50  # Small delay to let key state clear
+					# Flush any simulated key events from the console input buffer
+					# so they aren't mistaken for user keyboard input on the next check
+					try {
+						$hStdIn = [mJiggAPI.Mouse]::GetStdHandle(-10)
+						$flushBuf = New-Object 'mJiggAPI.INPUT_RECORD[]' 32
+						$flushCount = [uint32]0
+						if ([mJiggAPI.Mouse]::PeekConsoleInput($hStdIn, $flushBuf, 32, [ref]$flushCount) -and $flushCount -gt 0) {
+							[mJiggAPI.Mouse]::ReadConsoleInput($hStdIn, $flushBuf, $flushCount, [ref]$flushCount) | Out-Null
+						}
+					} catch { }
 				} catch {
 					# If keybd_event fails, continue without keyboard input
 					# Mouse movement alone should still work for most cases
@@ -6398,27 +6209,22 @@ namespace mJiggAPI {
 			}
 			
 			# Combine mouse inputs and keys for display
-			# Mouse inputs (with emoji) should appear first, then keyboard keys
+			# Mouse movement first, then clicks/scroll, then keyboard
 			$allInputs = @()
-			# Add mouse movement first if present (it's just the emoji now)
-			$mouseEmojiForCompare = [char]::ConvertFromUtf32(0x1F400)
-			$mouseMovement = $intervalMouseInputs | Where-Object { $_ -eq $mouseEmojiForCompare }
+			$mouseMovement = $intervalMouseInputs | Where-Object { $_ -eq "Mouse" }
 			if ($mouseMovement) {
 				$allInputs += $mouseMovement
-				# Add other mouse inputs (clicks) after movement
-				$otherMouseInputs = $intervalMouseInputs | Where-Object { $_ -ne $mouseEmojiForCompare }
+				$otherMouseInputs = $intervalMouseInputs | Where-Object { $_ -ne "Mouse" }
 				if ($otherMouseInputs) {
 					$allInputs += $otherMouseInputs
 				}
 			} else {
-				# No mouse movement, just add all mouse inputs
 				if ($intervalMouseInputs.Count -gt 0) {
 					$allInputs += $intervalMouseInputs
 				}
 			}
-			# Add keyboard keys after mouse inputs
-			if ($intervalKeys.Count -gt 0) {
-				$allInputs += $intervalKeys
+			if ($keyboardInputDetected) {
+				$allInputs += "Keyboard"
 			}
 			$PreviousIntervalKeys = $allInputs
 			

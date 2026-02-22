@@ -13,7 +13,7 @@ A feature-rich PowerShell mouse jiggler with a console-based TUI, designed to ke
 - **Mouse Stutter Prevention**: Waits for mouse to settle before starting next movement cycle
 - **Window Resize Handling**: Beautiful centered logo with playful quotes during resize
 - **Themeable UI**: Centralized color variables for easy customization
-- **Stats Box**: Real-time display of detected inputs and movement statistics
+- **Stats Box**: Real-time display of detected input categories (Mouse, Keyboard, mouse buttons, Scroll/Other) and movement statistics
 - **Click Support**: Mouse-clickable menu buttons and dialog interactions
 
 ## Requirements
@@ -46,6 +46,10 @@ Start-mJig -EndTime 1730
 
 # Run hidden in background
 Start-mJig -Output hidden
+
+# Debugging one-liner: launch in a new PowerShell session with full output and debug mode
+$mJig = "C:\Path\To\start-mjig.ps1"
+powershell -Command ". `"$mJig`"; Start-mJig -Output full -DebugMode"
 ```
 
 ### Parameters
@@ -134,15 +138,20 @@ Colors are defined as `$script:` variables in the Theme Colors section (around l
    - Moves cursor a random distance in a random direction
    - Sends a simulated Right Alt keypress (non-intrusive)
 
-2. **Input Detection**: Monitors keyboard and mouse activity system-wide using Win32 `GetAsyncKeyState`
+2. **Input Detection**: Monitors user activity using multiple mechanisms:
+   - `PeekConsoleInput` for keyboard and scroll wheel events (console-focused)
+   - `GetLastInputInfo` for system-wide activity detection (passive)
+   - `GetAsyncKeyState` for mouse button clicks (VK 0x01-0x06)
+   - Position polling for mouse movement
 
 3. **Stutter Prevention**: Before each movement cycle, verifies the mouse has been stationary for a brief period to avoid interfering with user actions
 
 ## Diagnostics
 
-Enable with `-Diag` flag. Creates log files in `$env:TEMP\mjig_diag\`:
+Enable with `-Diag` flag. Creates log files in `_diag/` (same directory as the script):
 - `startup.txt` - Initialization diagnostics
 - `settle.txt` - Mouse settle detection logs
+- `input.txt` - Input detection logs (PeekConsoleInput + GetLastInputInfo)
 
 ## License
 

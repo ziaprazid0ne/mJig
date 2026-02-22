@@ -42,10 +42,7 @@ The script is a single-file PowerShell application (~7,500 lines) implementing a
 
 ```
 start-mjig.ps1
-├── Get-KeyName function (lines 1-80)
-│   └── Standalone helper for mapping VK codes to readable names
-│
-└── Start-mJig function (lines 82-end)
+└── Start-mJig function (lines 1-end)
     │
     ├── ASCII Art Banner (lines 88-120)
     │   └── Decorative mouse ASCII art in comment block
@@ -99,12 +96,12 @@ start-mjig.ps1
     │   ├── RECT struct
     │   ├── CONSOLE_SCREEN_BUFFER_INFO struct
     │   ├── MOUSE_EVENT_RECORD struct
-    │   ├── INPUT_RECORD struct
+    │   ├── KEY_EVENT_RECORD struct
+    │   ├── INPUT_RECORD struct (union: MouseEvent + KeyEvent)
     │   ├── COORD struct
     │   ├── SMALL_RECT struct
-    │   ├── Keyboard class (GetAsyncKeyState, keybd_event)
-    │   ├── Mouse class (GetCursorPos, SetCursorPos, FindWindow, etc.)
-    │   └── MouseHook class (wheel detection)
+    │   ├── Keyboard class (keybd_event only)
+    │   └── Mouse class (GetCursorPos, SetCursorPos, GetAsyncKeyState, FindWindow, GetLastInputInfo, PeekConsoleInput, etc.)
     │
     ├── Assembly Loading & Verification (lines ~700-1260)
     │   ├── Load System.Windows.Forms
@@ -125,10 +122,11 @@ start-mjig.ps1
     │   │   └── Calculate random wait time with variance
     │   │
     │   ├── Wait Loop (~4670-5400)
-    │   │   ├── Mouse position monitoring
-    │   │   ├── Keyboard state scanning
-    │   │   ├── Menu hotkey detection
-    │   │   ├── Mouse click handling
+    │   │   ├── Mouse position monitoring (Test-MouseMoved)
+    │   │   ├── PeekConsoleInput (scroll + keyboard detection)
+    │   │   ├── GetLastInputInfo (system-wide activity + mouse inference)
+    │   │   ├── Mouse button click detection (VK 0x01-0x06)
+    │   │   ├── Menu hotkey detection (console ReadKey)
     │   │   ├── Window resize detection
     │   │   └── Dialog invocation
     │   │
@@ -157,7 +155,6 @@ start-mjig.ps1
     │       └── Exit if scheduled time reached
     │
     └── Cleanup (~7450-7476)
-        ├── Uninstall mouse hook
         └── Display runtime statistics
 ```
 
@@ -199,12 +196,16 @@ $point = New-Object mJiggAPI.POINT
 [mJiggAPI.Mouse]::GetCursorPos([ref]$point)
 [mJiggAPI.Mouse]::SetCursorPos($x, $y)
 
-# Keyboard state
-$state = [mJiggAPI.Keyboard]::GetAsyncKeyState($keyCode)
+# Mouse button state (only used for 0x01-0x06 mouse buttons)
+$state = [mJiggAPI.Mouse]::GetAsyncKeyState($keyCode)
 
 # Simulate keypress
 [mJiggAPI.Keyboard]::keybd_event($VK_RMENU, 0, 0, 0)  # Key down
 [mJiggAPI.Keyboard]::keybd_event($VK_RMENU, 0, $KEYEVENTF_KEYUP, 0)  # Key up
+
+# System-wide input detection (keyboard, mouse, scroll -- passive, no scanning)
+$lii = New-Object mJiggAPI.LASTINPUTINFO
+[mJiggAPI.Mouse]::GetLastInputInfo([ref]$lii)
 
 # Window detection
 $handle = [mJiggAPI.Mouse]::GetForegroundWindow()
@@ -215,11 +216,17 @@ $consoleHandle = [mJiggAPI.Mouse]::GetConsoleWindow()
 - `mJiggAPI.POINT` - X/Y coordinates
 - `mJiggAPI.RECT` - Window rectangle (Left, Top, Right, Bottom)
 - `mJiggAPI.COORD` - Console coordinates (short X, short Y)
+- `mJiggAPI.LASTINPUTINFO` - System idle time tracking (cbSize, dwTime)
+- `mJiggAPI.KEY_EVENT_RECORD` - Console keyboard event (bKeyDown, wVirtualKeyCode, etc.)
+- `mJiggAPI.MOUSE_EVENT_RECORD` - Console mouse event (dwMousePosition, dwEventFlags, etc.)
+- `mJiggAPI.INPUT_RECORD` - Console input union (EventType + MouseEvent/KeyEvent overlay at offset 4)
 
 **Key APIs:**
 - `GetCursorPos` / `SetCursorPos` - Mouse position read/write
-- `GetAsyncKeyState` - System-wide keyboard/mouse button state
+- `GetAsyncKeyState` - Mouse button state only (VK 0x01-0x06); also used for Shift/Ctrl modifier checks
 - `keybd_event` - Simulate key presses
+- `GetLastInputInfo` - Passive system-wide last input timestamp (detects all input: keyboard, mouse, scroll)
+- `PeekConsoleInput` / `ReadConsoleInput` - Console input buffer access for scroll and keyboard event detection
 - `FindWindow` / `EnumWindows` - Window handle lookup
 - `GetForegroundWindow` - Currently active window
 - `GetConsoleWindow` - This script's console window
@@ -317,17 +324,7 @@ while ($true) {
 }
 ```
 
-Additionally, the wait loop skips expensive `GetAsyncKeyState` scanning when mouse has moved recently:
-
-```powershell
-$mouseRecentlyMoving = ($null -ne $script:LastMouseMovementTime) -and 
-                       ((Get-TimeSinceMs -startTime $script:LastMouseMovementTime) -lt 200)
-
-if ($mouseRecentlyMoving) {
-    Start-Sleep -Milliseconds 50
-    continue  # Skip keyboard scanning
-}
-```
+Input detection during the wait loop uses `PeekConsoleInput` for keyboard/scroll events, `GetLastInputInfo` for system-wide activity, `Test-MouseMoved` for cursor position changes, and a focused `GetAsyncKeyState` loop over mouse buttons only (VK 0x01-0x06). No keyboard scanning (`GetAsyncKeyState` over key codes) is performed.
 
 ### 6. Window Resize Handling
 
@@ -481,19 +478,36 @@ Priority determines display order when truncating. Components with lower priorit
 
 ### 11. Input Detection and State Tracking
 
-The script uses `GetAsyncKeyState` for system-wide input detection:
+Input detection uses four complementary mechanisms, each providing evidence for a specific input type:
+
+1. **`PeekConsoleInput`** (keyboard + scroll) - Peeks at the console input buffer for event records. Detects `KEY_EVENT` (EventType 0x0001) for keyboard and `MOUSE_EVENT` with scroll flag (EventType 0x0002, dwEventFlags 0x0004) for scroll wheel. Keyboard events are only **peeked** (not consumed) so the menu hotkey handler can still read them. Scroll events are consumed to prevent buffer buildup. The simulated Right Alt key (VK 0xA5) is filtered out. Only works when console is focused.
+
+2. **`GetAsyncKeyState`** (mouse buttons only) - Focused loop over VK codes 0x01-0x06 for click detection and menu/dialog interaction. Not used for keyboard.
+
+3. **`GetLastInputInfo`** (system-wide catch-all) - Passive API returning the timestamp of the last user input of any type. Used to set `$script:userInputDetected = $true` (pauses the jiggler). Also infers **mouse movement** when activity is detected but no keyboard, scroll, or click evidence was found by the other mechanisms.
+
+4. **`Test-MouseMoved`** (position polling) - Compares cursor position against previous check with a pixel threshold. Provides direct evidence of mouse movement.
+
+**Classification logic (evidence-based, inference by elimination):**
+- **Mouse clicks**: `GetAsyncKeyState` VK 0x01-0x06 → direct evidence
+- **Scroll**: `PeekConsoleInput` MOUSE_EVENT with scroll flag → direct evidence
+- **Keyboard**: `PeekConsoleInput` KEY_EVENT records (excluding VK 0xA5) → direct evidence
+- **Mouse movement**: `Test-MouseMoved` position change → direct evidence; OR `GetLastInputInfo` activity with no keyboard/scroll/click evidence → inference by elimination
 
 ```powershell
-$state = [mJiggAPI.Keyboard]::GetAsyncKeyState($keyCode)
-$isCurrentlyPressed = ($state -band 0x8000) -ne 0    # Key is down now
-$wasJustPressed = ($state -band 0x0001) -ne 0        # Key was pressed since last check
+# Mouse button state (0x01-0x06 only)
+$state = [mJiggAPI.Mouse]::GetAsyncKeyState($keyCode)
+$isCurrentlyPressed = ($state -band 0x8000) -ne 0
+$wasJustPressed = ($state -band 0x0001) -ne 0
 ```
 
 **State tracking variables:**
-- `$script:previousKeyStates` - Hashtable of previous key states (for edge detection)
-- `$PressedKeys` - Currently pressed keys (for stats display)
-- `$intervalKeys` - Keys pressed during current interval
+- `$script:previousKeyStates` - Hashtable of previous mouse button states (for edge detection, VK 0x01-0x06 only)
 - `$script:LastSimulatedKeyPress` - Timestamp of last simulated press (for filtering)
+- `$keyboardInputDetected` - Boolean, set by `PeekConsoleInput` KEY_EVENT records
+- `$mouseInputDetected` - Boolean, set by mouse movement (Test-MouseMoved or GetLastInputInfo inference) or button clicks
+- `$scrollDetectedInInterval` - Boolean, set by `PeekConsoleInput` scroll events, persists across wait loop iterations
+- `$script:userInputDetected` - Boolean, set by any detection mechanism, triggers jiggler pause
 
 ### 12. Movement Animation
 
@@ -647,7 +661,7 @@ function Update-Setting {
 ### GetAsyncKeyState Return Values
 
 ```powershell
-$state = [mJiggAPI.Keyboard]::GetAsyncKeyState($keyCode)
+$state = [mJiggAPI.Mouse]::GetAsyncKeyState($keyCode)
 
 # Bit 15 (0x8000) - Key is currently down
 $isPressed = ($state -band 0x8000) -ne 0
@@ -656,7 +670,7 @@ $isPressed = ($state -band 0x8000) -ne 0
 $wasPressed = ($state -band 0x0001) -ne 0
 ```
 
-Note: The "was pressed" bit is consumed on read, so only check it once per call.
+Note: The "was pressed" bit is consumed on read, so only check it once per call. Only used for mouse buttons (0x01-0x06) and specific modifier keys (Shift, Ctrl).
 
 ### Type Reloading Limitations
 
@@ -664,13 +678,14 @@ PowerShell cannot unload types once loaded via `Add-Type`. If you modify the C# 
 
 ### Simulated Key Press Filtering
 
-When checking for keyboard input, filter out the script's own simulated key presses:
+When checking `GetLastInputInfo`, filter out the script's own simulated key presses and automated mouse movements:
 
 ```powershell
-$shouldCheckKeyboard = (Get-TimeSinceMs -startTime $LastSimulatedKeyPress) -ge 300
+$recentSimulated = ($null -ne $LastSimulatedKeyPress) -and ((Get-TimeSinceMs -startTime $LastSimulatedKeyPress) -lt 500)
+$recentAutoMove = ($null -ne $LastAutomatedMouseMovement) -and ((Get-TimeSinceMs -startTime $LastAutomatedMouseMovement) -lt 500)
 ```
 
-The script uses Right Alt (VK_RMENU = 0xA5) which is also skipped in keyboard scanning.
+The script simulates Right Alt (VK_RMENU = 0xA5) via `keybd_event`. After the simulated keypress, the console input buffer is flushed to prevent stale simulated events from being detected as user keyboard input by `PeekConsoleInput`. The `PeekConsoleInput` keyboard scan also explicitly filters out VK 0xA5.
 
 ### Emoji Display Width Variations
 
@@ -726,7 +741,7 @@ Windows Terminal has a setting "Automatically adjust lightness of indistinguisha
 ## Testing Tips
 
 1. **Debug Mode**: Run with `-DebugMode` for verbose console logging during initialization
-2. **Diagnostics**: Run with `-Diag` for file-based logs in `$env:TEMP\mjig_diag\`
+2. **Diagnostics**: Run with `-Diag` for file-based logs in `_diag/` (relative to script location)
 3. **Settle Detection**: Test by moving mouse during interval countdown - movement should be deferred
 4. **Resize Handling**: Drag window edges to test logo centering and quote display
 5. **Dialog Rendering**: Test dialogs at various window sizes (they should stay centered)
@@ -742,8 +757,21 @@ Windows Terminal has a setting "Automatically adjust lightness of indistinguisha
 | `start-mjig.ps1` | Main script (single file) |
 | `README.md` | User documentation |
 | `CONTEXT.md` | AI agent context (this file) |
-| `$env:TEMP\mjig_diag\startup.txt` | Initialization diagnostics |
-| `$env:TEMP\mjig_diag\settle.txt` | Mouse settle detection logs |
+| `CHANGELOG.md` | Change tracking across commits |
+| `.gitignore` | Excludes `_diag/` and backup files from git |
+| `_diag/startup.txt` | Initialization diagnostics (created with `-Diag`) |
+| `_diag/settle.txt` | Mouse settle detection logs (created with `-Diag`) |
+| `_diag/input.txt` | PeekConsoleInput + GetLastInputInfo input detection logs (created with `-Diag`) |
+
+The `_diag/` folder is created in the same directory as `start-mjig.ps1` when run with `-Diag`. It is git-ignored. AI agents can read these files directly from the project directory to diagnose runtime issues.
+
+**When reviewing diagnostic output with the user**, always provide a ready-to-run command to print the relevant diag file. The user expects this every time. Use:
+
+```powershell
+Get-Content ".\_diag\input.txt"
+Get-Content ".\_diag\startup.txt"
+Get-Content ".\_diag\settle.txt"
+```
 
 No external dependencies - the script is fully self-contained.
 

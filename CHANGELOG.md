@@ -6,7 +6,59 @@ All notable changes to `start-mjig.ps1` are documented in this file.
 
 ## [Latest] - Unreleased
 
-Changes since last commit (8014293 - "a bit broken but with a bunch of updates"):
+Changes since last commit (3f27144 - "still working towords initial release"):
+
+### Added
+- `mJiggAPI.LASTINPUTINFO` struct, `GetLastInputInfo`, and `GetTickCount64` P/Invoke for passive system-wide input detection
+- `mJiggAPI.KEY_EVENT_RECORD` struct for reading keyboard events from the console input buffer
+- `KEY_EVENT_RECORD` overlay added to `INPUT_RECORD` union (at FieldOffset 4, alongside MouseEvent)
+- `PeekConsoleInput`-based keyboard event detection -- reads KEY_EVENT records (EventType 0x0001) from the console input buffer to provide evidence-based keyboard detection without scanning key codes
+- `PeekConsoleInput`-based scroll wheel detection -- reads MOUSE_EVENT records with scroll flag (EventType 0x0002, dwEventFlags 0x0004)
+- Mouse movement inference via `GetLastInputInfo` -- when system activity is detected but no keyboard, scroll, or click evidence exists, it is classified as mouse movement
+- Console input buffer flush after simulated keypress to prevent stale Right Alt events from being detected as user keyboard input
+- `_diag/input.txt` diagnostic log for PeekConsoleInput + GetLastInputInfo detection
+- `.gitignore` to exclude `_diag/` folder and backup files from git
+
+### Changed
+- **Input Detection Architecture**: Complete overhaul of input classification. All input types are now evidence-based:
+  - **Keyboard**: Detected via `PeekConsoleInput` KEY_EVENT records (filtered for simulated VK 0xA5). Only peeked, not consumed, so menu hotkey handler can still read them.
+  - **Scroll**: Detected via `PeekConsoleInput` MOUSE_EVENT with scroll flag. Consumed to prevent buffer buildup.
+  - **Mouse clicks**: Detected via `GetAsyncKeyState` VK 0x01-0x06 (unchanged).
+  - **Mouse movement**: Detected via `Test-MouseMoved` position polling or inferred by `GetLastInputInfo` when no other input type explains the activity.
+  - **`GetLastInputInfo`**: No longer infers "keyboard" -- only sets `$script:userInputDetected` and infers mouse movement by elimination.
+- **Mouse movement display label**: Changed from emoji (🐀) to text "Mouse" in the detected inputs display
+- **Scroll/Input Detection**: Replaced system-wide low-level mouse hook (`WH_MOUSE_LL` / `mJiggAPI.MouseHook`) with `PeekConsoleInput` + `GetLastInputInfo`-based detection. Uses `GetTickCount64` for 64-bit tick math to avoid overflow on systems with >24.9 days uptime.
+- **Diagnostics folder**: Moved from `$env:TEMP\mjig_diag\` to `_diag/` relative to the script location, so agents and users can access logs directly in the project directory
+- Resize quote color changed from `DarkGray` to `White`
+
+### Removed
+- `mJiggAPI.MouseHook` class and all associated P/Invoke definitions (`SetWindowsHookEx`, `UnhookWindowsHookEx`, `CallNextHookEx`, `GetModuleHandle`, `PeekMessage`, `MSG`, `MSLLHOOKSTRUCT`, `LowLevelMouseProc`)
+- `$PreviousMouseWheelDelta` tracking variable (no longer needed)
+- Mouse hook install/uninstall/ProcessMessages calls from initialization, debug pause, and main loop
+- Keyboard inference from `GetLastInputInfo` -- the flawed "if not mouse, must be keyboard" logic has been removed entirely
+
+### Fixed
+- Mouse cursor lag during debug "press any key" pause and potentially during busy main loop sections, caused by `WH_MOUSE_LL` hook starving the system message pump
+- False "Keyboard" labels appearing when only mouse movement or scroll wheel was used -- caused by `GetLastInputInfo` incorrectly defaulting to keyboard when `Test-MouseMoved` had brief polling gaps
+- Menu hotkeys not responding -- `PeekConsoleInput` was consuming KEY_EVENT records from the buffer before the menu hotkey handler (`$Host.UI.RawUI.ReadKey`) could read them. Fixed by only peeking (not consuming) keyboard events.
+
+### Security
+- **Removed `Get-KeyName` function** -- eliminated VK-code-to-name mapping table that security scanners flag as keylogger pattern
+- **Removed full 256-code `GetAsyncKeyState` keyboard scan** -- the `for ($keyCode = 0; $keyCode -le 255; ...)` loop that polled every virtual key code every ~50ms has been replaced with a focused mouse-button-only loop (VK 0x01-0x06)
+- **Removed `GetAsyncKeyState` from `Keyboard` class** -- the API is now only exposed in the `Mouse` class, reducing the P/Invoke surface
+- **Removed `PressedKeys` real-time display scan** -- the secondary 256-code scan that populated real-time key state for the stats box has been removed entirely
+- **Keyboard detection now evidence-based** -- `$keyboardInputDetected` is set only when actual KEY_EVENT records are found in the console input buffer via `PeekConsoleInput`. No key identity is captured beyond filtering the simulated VK 0xA5.
+- **Stats box shows categories, not key names** -- "Detected Inputs" now displays `Mouse`, `Keyboard`, `LButton`, `Scroll/Other` etc. instead of specific key names like `A, LShift, Space`
+- **Removed `$PressedKeys` and `$intervalKeys`** -- variables that accumulated specific key names are removed; only boolean flags and category labels remain
+
+---
+
+## [3f27144] - 2026-02-21
+
+### Commit Message
+"still working towords initial release, there is now a changelog.md for better tracking of changes across commits. and a context.md for quicker training of agents."
+
+Changes since commit 8014293 ("a bit broken but with a bunch of updates"):
 
 ### Added
 
@@ -23,7 +75,7 @@ Changes since last commit (8014293 - "a bit broken but with a bunch of updates")
 - `-AutoResumeDelaySeconds` (double) - Cooldown timer after user input
 
 #### New Functions
-- `Get-KeyName` - Standalone helper function (lines 1-80) for mapping VK codes to readable names
+- `Get-KeyName` - Standalone helper function for mapping VK codes to readable names *(removed in latest -- see Security section)*
 - `Find-WindowHandle` - Window handle lookup using EnumWindows
 - `Get-Padding` - Calculate padding for dialog layouts
 - `Get-TimeSinceMs` - Calculate milliseconds elapsed since a timestamp
@@ -59,9 +111,14 @@ Changes since last commit (8014293 - "a bit broken but with a bunch of updates")
 - `mJiggAPI.MOUSE_EVENT_RECORD` - Mouse event data
 - `mJiggAPI.INPUT_RECORD` - Input record union
 - `mJiggAPI.SMALL_RECT` - Small rectangle struct
-- `mJiggAPI.Keyboard` - Keyboard APIs (GetAsyncKeyState, keybd_event)
+- `mJiggAPI.Keyboard` - Keyboard APIs (GetAsyncKeyState, keybd_event) *(GetAsyncKeyState later moved to Mouse class -- see latest)*
 - `mJiggAPI.Mouse` - Mouse/Window APIs (GetCursorPos, SetCursorPos, FindWindow, EnumWindows, etc.)
 - `mJiggAPI.MouseHook` - Mouse wheel hook (WH_MOUSE_LL)
+
+#### New Documentation
+- `CHANGELOG.md` - Structured change tracking across commits
+- `CONTEXT.md` - Deep codebase context for AI agents
+- `README.md` - Rewritten with full parameter table, usage examples, and architecture notes
 
 ### Changed
 
@@ -96,16 +153,16 @@ Changes since last commit (8014293 - "a bit broken but with a bunch of updates")
 
 ---
 
-## [8014293] - 2026-02-20
+## [8014293] - 2026-02-10
 
 ### Commit Message
 "a bit broken but with a bunch of updates"
 
-*This commit represents the baseline. Changes documented above in [Latest] are relative to this commit.*
+*This commit represents the baseline. Changes documented in [3f27144] above are relative to this commit.*
 
 ---
 
-## [06f12d6] - Previous
+## [06f12d6] - 2026-01-22
 
 ### Commit Message
 "major feature changes and bug fixes"
