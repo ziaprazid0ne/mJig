@@ -6,7 +6,71 @@ All notable changes to `start-mjig.ps1` are documented in this file.
 
 ## [Latest] - Unreleased
 
-Changes since last commit (3f27144 - "still working towords initial release"):
+Changes since last commit (4ddbfc2 - "Evidence-based input detection, security hardening, scroll/mouse hook removal"):
+
+### Added
+- `$script:MenuClickHotkey` - Script-scoped variable for menu click hotkey (was previously used but never initialized)
+- `$script:ConsoleClickCoords` - Script-scoped variable storing character cell X/Y from the last left-click detected via `PeekConsoleInput` MOUSE_EVENT records
+- **Mouse click detection via PeekConsoleInput** - Main loop, Time dialog, Movement dialog, and Quit dialog all detect left-button clicks by reading native `MOUSE_EVENT` records from the console input buffer. The console provides exact character cell coordinates, eliminating all pixel-to-character math.
+- **Movement dialog field click selection** - Clicking on a field row in the Modify Movement dialog now switches the active field to the clicked row, redraws only the affected rows (no flicker), and positions the cursor at the end of that field's input
+- **Quit dialog Yes/No button click support** - The quit confirmation dialog now responds to mouse clicks on the Yes and No buttons
+- **Buffered frame rendering** - `Write-Buffer`, `Flush-Buffer`, `Clear-Buffer` functions and `$script:RenderQueue` (`System.Collections.Generic.List[hashtable]`). All UI rendering now writes to an in-memory queue first, then flushes to the console in a single burst per frame.
+- **VT100/ANSI single-write rendering** - `Flush-Buffer` builds a single string with embedded VT100 escape sequences (cursor positioning, color changes, cursor visibility) via `StringBuilder`, then outputs the entire frame with one `[Console]::Write()` call. Eliminates 55-80 separate `Write-Host` calls per frame.
+- **VT100 processing enabled on stdout** - `ENABLE_VIRTUAL_TERMINAL_PROCESSING` (0x0004) enabled on the output handle via `SetConsoleMode` during console setup
+- **UTF-8 console encoding** - `[Console]::OutputEncoding` set to `[System.Text.Encoding]::UTF8` for correct emoji rendering via `[Console]::Write()`
+- **ConsoleColor-to-ANSI mapping tables** - `$script:AnsiFG` and `$script:AnsiBG` hashtables mapping all 16 `[ConsoleColor]` values to ANSI SGR codes (30-37/90-97 for FG, 40-47/100-107 for BG)
+- **`$script:CursorVisible` tracking variable** - Tracks cursor visibility state for conditional cursor show/hide in VT100 sequences
+- **`$script:ESC` variable** - Stores `[char]27` for VT100 escape sequence construction
+- **`-ClearFirst` switch on `Flush-Buffer`** - Embeds `ESC[2J` (clear screen) in the VT100 string for atomic clear+redraw with no visible flash
+- **`-ClearFirst` switch on `Draw-ResizeLogo`** - Passes through to `Flush-Buffer -ClearFirst`
+- **Hidden view `(h)` button** - Clickable button in bottom-right corner of hidden mode, behaves like the hide_output toggle
+
+### Changed
+- **All rendering paths use buffered output** - Header, separators, log entries, stats box, menu bar, all three dialogs (Time, Movement, Quit), dialog shadows, field redraws, resize logo, and dialog cleanup all write through `Write-Buffer` instead of directly to the console. `Flush-Buffer` is called at well-defined frame boundaries.
+- **Emoji positions computed statically** - Menu bar, header, and dialog button rows no longer read `$Host.UI.RawUI.CursorPosition.X` after writing emojis. Instead, positions are calculated mathematically (emoji = 2 display cells), and menu item bounds (`$script:MenuItemsBounds`) are tracked by arithmetic rather than cursor position reads.
+- **Click detection architecture** - Replaced the previous `GetAsyncKeyState` + `Get-MousePosition` + screen-pixel-to-character-cell conversion approach with native console input buffer events. `PeekConsoleInput` reads `MOUSE_EVENT` records which provide exact character cell coordinates directly from the console.
+- **Left-button guard added** - Click-to-button mapping in the main loop only processes left button presses (dwButtonState & 0x0001), preventing accidental menu triggers from other mouse buttons.
+- **Debug mode gate removed** - Click detection logic now runs in all modes, not just when `$DebugMode` is enabled. Debug logging remains conditional.
+- **Simplified hit-testing** - All click detection now uses simple character cell comparisons. No pixel math, tolerance percentages, or expanded bounding boxes.
+- **Cursor visibility via VT100** - All `[Console]::CursorVisible` assignments replaced with VT100 `ESC[?25l`/`ESC[?25h` sequences and `$script:CursorVisible` tracking. `Flush-Buffer` conditionally shows cursor at end of frame based on tracked state.
+- **Default colors use ANSI 39/49** - Segments without explicit FG/BG colors emit ANSI "default foreground" (39) and "default background" (49) codes instead of mapping console's current color, preserving the terminal's true default/transparent background.
+- **Atomic screen clear+redraw** - All `Clear-Host` + rendering pairs replaced with `Flush-Buffer -ClearFirst`, embedding the screen clear in the VT100 string so clear and redraw happen in a single `[Console]::Write()` call with no visible blank flash. Affects resize logo, dialog resize, and hidden view.
+- **Hidden view clears old menu bounds** - `$script:MenuItemsBounds` cleared when entering hidden mode so old buttons are not clickable.
+
+### Removed
+- `Convert-ScreenToConsole` function - Screen pixel to console cell conversion (replaced by PeekConsoleInput native coords)
+- `Test-ClickInBounds` function - Pixel-based hit-test with tolerance expansion (replaced by exact cell matching)
+- `Get-ConsoleWindowHandle` function - Cached window handle lookup (no longer needed without pixel conversion)
+- `$script:CachedConsoleHandle`, `$script:LastClickDebug`, `$script:ClickTolerancePct` variables
+- `RECT` struct, `ScreenToClient`, `GetWindowRect`, `GetClientRect` P/Invoke declarations
+- `CONSOLE_FONT_INFOEX` struct, `GetCurrentConsoleFontEx` P/Invoke declaration
+- `ReadConsoleOutputAttribute` and `WriteConsoleOutputAttribute` P/Invoke declarations (unused remnants from previous emoji background fix attempt)
+- All `[Console]::CursorVisible` references (replaced by VT100 sequences)
+- Segment merging optimization in `Flush-Buffer` (no longer needed -- VT100 color changes are just bytes in the string, not separate API calls)
+- Separate `Clear-Host` calls before rendering (replaced by `-ClearFirst` flag)
+
+### Fixed
+- **Clickable menu buttons not working** - The entire click-to-button coordinate conversion pipeline was gated behind `if ($DebugMode)`, making click detection silently fail in normal operation. Replaced with always-on PeekConsoleInput approach.
+- **Undefined `$gotCursorPos` variable** - The main loop checked `if ($gotCursorPos)` which was never defined, causing coordinate conversion to always be skipped.
+- **`$mousePoint` vs `$mousePos` variable mismatch** - Code retrieved mouse position into `$mousePos` but attempted to read from `$mousePoint`, which was never populated.
+- **Quit dialog click detection** - `$keyProcessed` and `$char` were reset immediately after being set by `$script:DialogButtonClick`, wiping out the click result.
+- **Click detection broke after Modify Movement dialog** - Added `$script:DialogButtonBounds = $null` cleanup on dialog close.
+- **Window resize triggered quit dialog** - Resolved by switching to PeekConsoleInput, which only fires MOUSE_EVENT records when the console is focused.
+- **Button bounds tightened to visible characters** - Click areas now correspond exactly to rendered emoji+pipe+text characters.
+- **UI strobing/flicker** - Replaced 55-80 `Write-Host` calls per frame with single VT100 `[Console]::Write()` call, reducing frame render time from 55-160ms to sub-millisecond.
+- **Grey background on default areas** - VT100 renderer now uses ANSI code 49 (default background) instead of mapping `[Console]::BackgroundColor` to an explicit color.
+- **Emoji background on 2-column emoji** - `Write-Buffer -Wide` appends a trailing space with the background color for wide emojis; the explicit pipe positioning overwrites the space.
+- **Hidden view resize crash** - `SetCursorPosition` out-of-bounds during resize replaced by VT100 positioning (no exception possible).
+- **Hidden view strobing** - Full-frame clear+redraw now atomic via `Flush-Buffer -ClearFirst`.
+
+---
+
+## [4ddbfc2] - 2026-02-21
+
+### Commit Message
+"Evidence-based input detection, security hardening, scroll/mouse hook removal"
+
+Changes since commit 3f27144 ("still working towords initial release"):
 
 ### Added
 - `mJiggAPI.LASTINPUTINFO` struct, `GetLastInputInfo`, and `GetTickCount64` P/Invoke for passive system-wide input detection

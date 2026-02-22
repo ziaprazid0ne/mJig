@@ -15,6 +15,7 @@ A feature-rich PowerShell mouse jiggler with a console-based TUI, designed to ke
 - **Themeable UI**: Centralized color variables for easy customization
 - **Stats Box**: Real-time display of detected input categories (Mouse, Keyboard, mouse buttons, Scroll/Other) and movement statistics
 - **Click Support**: Mouse-clickable menu buttons and dialog interactions
+- **Flicker-Free Rendering**: VT100/ANSI escape sequence rendering with atomic single-write frame output
 
 ## Requirements
 
@@ -110,8 +111,9 @@ You can also click menu buttons with your mouse.
 - Menu bar only (no log or stats)
 
 ### Hidden Mode
-- No visible output
+- Minimal display: status line and clickable `(h)` button in bottom-right corner
 - Hotkeys still functional
+- Click `(h)` or press `h` to return to previous view
 - Perfect for background operation
 
 ## Configuration

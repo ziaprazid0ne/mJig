@@ -13,11 +13,23 @@ This document provides deep context for AI agents working on the `start-mjig.ps1
 >
 > Keeping documentation in sync prevents knowledge drift and ensures future AI agents have accurate context.
 
+> **COMMIT WORKFLOW**: When the user says they are ready to commit (e.g. "I have everything staged", "please commit"), follow this process:
+> 1. Run `git status` and `git log --oneline -5` to see staged files and recent commit style.
+> 2. Write a commit message: first line is a concise summary of the biggest feature changes. Body is a bulleted list of key changes. End with "See CHANGELOG.md for full details."
+> 3. Write the message to a temp file (`_commit_msg.txt`) and use `git commit -F _commit_msg.txt` (PowerShell does not support heredoc in git commands). Delete the temp file after.
+> 4. Verify with `git status` that the working tree is clean.
+> 5. **After the commit is confirmed**, prep `CHANGELOG.md` for the next commit:
+>    - Move the current `[Latest] - Unreleased` content into a new versioned section with the commit hash and today's date.
+>    - Replace `[Latest] - Unreleased` with a fresh empty section referencing the new commit.
+>    - Do NOT stage or commit this changelog prep -- it becomes the starting point for the next round of changes.
+>
+> The user expects this full workflow every time. Do not skip the changelog prep step.
+
 ---
 
 ## Architecture Overview
 
-The script is a single-file PowerShell application (~7,500 lines) implementing a console-based TUI mouse jiggler. It uses Win32 API calls via P/Invoke for low-level mouse/keyboard interaction.
+The script is a single-file PowerShell application (~6,000 lines) implementing a console-based TUI mouse jiggler. It uses Win32 API calls via P/Invoke for low-level mouse/keyboard interaction.
 
 ### High-Level Flow
 
@@ -75,25 +87,24 @@ start-mjig.ps1
     │   ├── Resize screen colors
     │   └── General UI colors
     │
-    ├── Helper Functions (lines 291-2800)
-    │   ├── Find-WindowHandle (~291-400)
-    │   ├── Get-Padding (~400-420)
-    │   ├── Get-TimeSinceMs (~420-440)
-    │   ├── Get-ValueWithVariance (~440-460)
-    │   ├── Get-MousePosition (~460-500)
-    │   ├── Test-MouseMoved (~500-520)
-    │   ├── Draw-DialogShadow (~520-600)
-    │   ├── Clear-DialogShadow (~600-650)
-    │   ├── Write-SimpleDialogRow (~650-750)
-    │   ├── Write-SimpleFieldRow (~750-850)
-    │   ├── Show-MovementModifyDialog (~1600-2400)
-    │   ├── Show-QuitConfirmationDialog (~2400-2600)
-    │   ├── Show-TimeChangeDialog (~2600-2800)
-    │   └── Draw-ResizeLogo (~2800-2950)
+    ├── Helper Functions (lines 212-3600)
+    │   ├── Find-WindowHandle (~212-400)
+    │   ├── Buffered Rendering (Write-Buffer, Flush-Buffer, Clear-Buffer) (~1454-1515)
+    │   ├── Draw-DialogShadow / Clear-DialogShadow (~1518-1555)
+    │   ├── Show-TimeChangeDialog (~1557-2220)
+    │   ├── Draw-ResizeLogo (~2225-2320)
+    │   ├── Get-MousePosition (~2326-2340)
+    │   ├── Test-MouseMoved (~2337-2355)
+    │   ├── Get-TimeSinceMs (~2351-2358)
+    │   ├── Get-ValueWithVariance (~2358-2380)
+    │   ├── Get-Padding (~2381-2408)
+    │   ├── Write-SimpleDialogRow (~2409-2434)
+    │   ├── Write-SimpleFieldRow (~2434-2475)
+    │   ├── Show-MovementModifyDialog (~2478-3215)
+    │   └── Show-QuitConfirmationDialog (~3219-3600)
     │
-    ├── P/Invoke Type Definitions (lines ~700-1200)
+    ├── P/Invoke Type Definitions (lines ~700-900)
     │   ├── POINT struct
-    │   ├── RECT struct
     │   ├── CONSOLE_SCREEN_BUFFER_INFO struct
     │   ├── MOUSE_EVENT_RECORD struct
     │   ├── KEY_EVENT_RECORD struct
@@ -101,7 +112,7 @@ start-mjig.ps1
     │   ├── COORD struct
     │   ├── SMALL_RECT struct
     │   ├── Keyboard class (keybd_event only)
-    │   └── Mouse class (GetCursorPos, SetCursorPos, GetAsyncKeyState, FindWindow, GetLastInputInfo, PeekConsoleInput, etc.)
+    │   └── Mouse class (GetCursorPos, SetCursorPos, GetAsyncKeyState, FindWindow, GetLastInputInfo, PeekConsoleInput, ReadConsoleInput, etc.)
     │
     ├── Assembly Loading & Verification (lines ~700-1260)
     │   ├── Load System.Windows.Forms
@@ -113,48 +124,47 @@ start-mjig.ps1
     │   ├── Apply variance to end time
     │   └── Determine if end time is today/tomorrow
     │
-    ├── Main Loop (lines ~4600-7400)
+    ├── Main Loop (lines ~3654-6011)
     │   │
-    │   ├── Loop Initialization (~4620-4640)
+    │   ├── Loop Initialization (~3654-3700)
     │   │   └── Reset per-iteration state variables
     │   │
-    │   ├── Interval Calculation (~4640-4670)
+    │   ├── Interval Calculation (~3700-3730)
     │   │   └── Calculate random wait time with variance
     │   │
-    │   ├── Wait Loop (~4670-5400)
+    │   ├── Wait Loop (~3706-4200)
     │   │   ├── Mouse position monitoring (Test-MouseMoved)
-    │   │   ├── PeekConsoleInput (scroll + keyboard detection)
+    │   │   ├── PeekConsoleInput (scroll + keyboard + mouse click detection)
     │   │   ├── GetLastInputInfo (system-wide activity + mouse inference)
-    │   │   ├── Mouse button click detection (VK 0x01-0x06)
     │   │   ├── Menu hotkey detection (console ReadKey)
     │   │   ├── Window resize detection
     │   │   └── Dialog invocation
     │   │
-    │   ├── Mouse Settle Detection (~5400-5600)
+    │   ├── Mouse Settle Detection (~4200-4400)
     │   │   └── Wait for mouse to stop moving
     │   │
-    │   ├── Resize Handling Loop (~5600-5800)
-    │   │   ├── Clear screen on resize start
-    │   │   ├── Draw centered logo/box
+    │   ├── Resize Handling Loop (~4400-4800)
+    │   │   ├── Draw-ResizeLogo -ClearFirst (atomic clear+draw)
     │   │   └── Wait for resize completion
     │   │
-    │   ├── Movement Execution (~5800-6200)
+    │   ├── Movement Execution (~4800-5000)
     │   │   ├── Calculate random direction
     │   │   ├── Animate cursor movement
     │   │   └── Send simulated keypress
     │   │
-    │   ├── UI Rendering (~6200-7200)
+    │   ├── UI Rendering (~5000-5930)
     │   │   ├── Header line
     │   │   ├── Horizontal separator
     │   │   ├── Log entries (full view)
     │   │   ├── Stats box (full view, wide window)
     │   │   ├── Bottom separator
-    │   │   └── Menu bar
+    │   │   ├── Menu bar
+    │   │   └── Hidden view (status line + (h) button)
     │   │
-    │   └── End Time Check (~7400)
+    │   └── End Time Check (~5990)
     │       └── Exit if scheduled time reached
     │
-    └── Cleanup (~7450-7476)
+    └── Cleanup (~6000-6011)
         └── Display runtime statistics
 ```
 
@@ -182,6 +192,12 @@ These can be modified at runtime via the Modify Movement dialog. When accessing 
 - `$script:DiagEnabled` - Diagnostics flag
 - `$script:LoopIteration` - Main loop counter
 - `$script:MenuItemsBounds` - Click detection bounds
+- `$script:MenuClickHotkey` - Menu item hotkey triggered by mouse click
+- `$script:ConsoleClickCoords` - Character cell X/Y from last PeekConsoleInput left-click event
+- `$script:RenderQueue` - `System.Collections.Generic.List[hashtable]` used by buffered rendering (`Write-Buffer`/`Flush-Buffer`)
+- `$script:ESC` - `[char]27` for VT100 escape sequences
+- `$script:CursorVisible` - Boolean tracking cursor visibility state for VT100 sequences
+- `$script:AnsiFG` / `$script:AnsiBG` - ConsoleColor-to-ANSI SGR code lookup hashtables
 - `$script:LastMouseMovementTime` - Stutter prevention timing
 - `$script:ResizeQuotes` - Playful quotes array
 - `$script:CurrentResizeQuote` - Currently displayed quote
@@ -214,7 +230,6 @@ $consoleHandle = [mJiggAPI.Mouse]::GetConsoleWindow()
 
 **Key structs:**
 - `mJiggAPI.POINT` - X/Y coordinates
-- `mJiggAPI.RECT` - Window rectangle (Left, Top, Right, Bottom)
 - `mJiggAPI.COORD` - Console coordinates (short X, short Y)
 - `mJiggAPI.LASTINPUTINFO` - System idle time tracking (cbSize, dwTime)
 - `mJiggAPI.KEY_EVENT_RECORD` - Console keyboard event (bKeyDown, wVirtualKeyCode, etc.)
@@ -230,31 +245,55 @@ $consoleHandle = [mJiggAPI.Mouse]::GetConsoleWindow()
 - `FindWindow` / `EnumWindows` - Window handle lookup
 - `GetForegroundWindow` - Currently active window
 - `GetConsoleWindow` - This script's console window
-- `ScreenToClient` - Convert screen coords to window coords
 
-### 3. Console TUI Rendering
+### 3. Console TUI Rendering (VT100 Buffered)
 
-The UI uses `[Console]::SetCursorPosition()` and `Write-Host` for precise character placement:
-
-```powershell
-[Console]::SetCursorPosition($x, $y)
-Write-Host "text" -NoNewline -ForegroundColor $color -BackgroundColor $bg
-```
-
-**Key patterns:**
+All rendering goes through a buffered rendering system backed by VT100/ANSI escape sequences. Code calls `Write-Buffer` to queue positioned, colored text segments, then `Flush-Buffer` builds a single string with embedded VT100 escape codes and outputs the entire frame with one `[Console]::Write()` call.
 
 ```powershell
-# Draw at specific position
-[Console]::SetCursorPosition($col, $row)
-Write-Host $text -NoNewline
+# Queue segments at specific positions with colors
+Write-Buffer -X $col -Y $row -Text $text -FG $fgColor -BG $bgColor
 
-# Fill remaining line width
-$remaining = $HostWidth - [Console]::CursorPosition.X
-Write-Host (" " * $remaining) -NoNewline
+# Queue sequential segments (continue from last position)
+Write-Buffer -Text "more text" -FG $color
 
-# Draw box border
-Write-Host "$($script:BoxTopLeft)$($script:BoxHorizontal * $width)$($script:BoxTopRight)"
+# Flush all queued segments to console (single atomic write)
+Flush-Buffer
+
+# Atomic clear screen + redraw (no visible blank flash)
+Flush-Buffer -ClearFirst
 ```
+
+**VT100 setup** (console mode block, ~line 458):
+- `ENABLE_VIRTUAL_TERMINAL_PROCESSING` (0x0004) enabled on stdout handle via `SetConsoleMode`
+- `[Console]::OutputEncoding` set to `[System.Text.Encoding]::UTF8` for correct emoji rendering
+
+**ANSI color tables** (`$script:AnsiFG`, `$script:AnsiBG`, ~line 1464):
+- Map all 16 `[ConsoleColor]` enum values to ANSI SGR codes (FG: 30-37/90-97, BG: 40-47/100-107)
+- Segments with `$null` FG/BG use ANSI codes 39/49 (terminal default colors) instead of explicit color codes
+
+**Buffer infrastructure** (`$script:RenderQueue`, `Write-Buffer`, `Flush-Buffer`, `Clear-Buffer`):
+- `$script:RenderQueue` - `System.Collections.Generic.List[hashtable]` holding `@{ X; Y; Text; FG; BG }` segments
+- `Write-Buffer` - Adds a segment. `X`/`Y` of `-1` = continue from last position. `FG`/`BG` of `$null` = use terminal default color. `-Wide` switch appends a trailing space for 2-column emoji background fill.
+- `Flush-Buffer` - Builds a `StringBuilder` with VT100 sequences: `ESC[?25l` (hide cursor), `ESC[row;colH` (positioning), `ESC[fg;bgm` (colors, only emitted on change), segment text, `ESC[0m` (reset), optional `ESC[?25h` (show cursor if `$script:CursorVisible` is true). Single `[Console]::Write()` outputs the entire frame atomically. `-ClearFirst` switch prepends `ESC[2J` for atomic screen clear+redraw.
+- `Clear-Buffer` - Discards all queued segments without writing.
+
+**Cursor visibility** is tracked via `$script:CursorVisible` (boolean) and controlled with VT100 sequences (`ESC[?25l` / `ESC[?25h`) instead of `[Console]::CursorVisible`. The cursor is hidden during flush and conditionally shown at the end based on the tracked state (e.g., shown during dialog text input, hidden otherwise).
+
+**Frame boundaries** (where `Flush-Buffer` is called):
+1. After initial dialog draw (shadow + borders + fields + buttons)
+2. After dialog field redraw (2 affected rows on navigation/click)
+3. After dialog input value change (character typed, backspace, validation error)
+4. After dialog resize handler redraw (`Flush-Buffer -ClearFirst`)
+5. After dialog cleanup (clear shadow + clear area)
+6. After full main UI render (header + separator + logs + stats + separator + menu)
+7. After resize logo draw (`Draw-ResizeLogo -ClearFirst` on first draw)
+
+**What stays as direct writes:**
+- Debug/diagnostic logging to files (`Out-File`)
+- One-off `Write-Host` calls during initialization/startup (before main loop)
+- `[Console]::SetCursorPosition` for positioning the text input cursor in dialogs (after Flush-Buffer)
+- Direct `[Console]::Write()` of VT100 cursor show/hide sequences during dialog text input state changes
 
 **Box-drawing characters** are stored as variables to avoid encoding issues:
 
@@ -324,14 +363,14 @@ while ($true) {
 }
 ```
 
-Input detection during the wait loop uses `PeekConsoleInput` for keyboard/scroll events, `GetLastInputInfo` for system-wide activity, `Test-MouseMoved` for cursor position changes, and a focused `GetAsyncKeyState` loop over mouse buttons only (VK 0x01-0x06). No keyboard scanning (`GetAsyncKeyState` over key codes) is performed.
+Input detection during the wait loop uses `PeekConsoleInput` for keyboard, scroll, and mouse click events (with exact character cell coordinates for click-to-button mapping), `GetLastInputInfo` for system-wide activity, `Test-MouseMoved` for cursor position changes, and a focused `GetAsyncKeyState` loop over mouse buttons only (VK 0x01-0x06) for general input detection. No keyboard scanning (`GetAsyncKeyState` over key codes) is performed.
 
 ### 6. Window Resize Handling
 
 When the console window is resized:
 
 1. **Detection**: Compare `$Host.UI.RawUI.WindowSize` against stored size
-2. **Clear**: Immediately `Clear-Host` when resize starts
+2. **Clear+Draw**: Atomically clear screen and draw logo via `Draw-ResizeLogo -ClearFirst`
 3. **Logo**: Draw centered "mJig(🐀)" with decorative box
 4. **Quote**: Display random playful quote from `$script:ResizeQuotes`
 5. **Wait**: Stay in tight loop, redrawing only on size change
@@ -344,17 +383,17 @@ $isNewSize = ($currentSize.Width -ne $PendingResizeWidth) -or
              ($currentSize.Height -ne $PendingResizeHeight)
 
 if ($isNewSize -and -not $ResizeClearedScreen) {
-    Clear-Host
-    $script:CurrentResizeQuote = $null  # Get new quote
-    Draw-ResizeLogo
+    $script:CurrentResizeQuote = $null
+    Draw-ResizeLogo -ClearFirst
     $ResizeClearedScreen = $true
 }
 ```
 
 The `Draw-ResizeLogo` function:
+- Accepts `-ClearFirst` switch (passed through to `Flush-Buffer`)
 - Calculates center position for logo
 - Draws box with dynamic padding (42% of available space)
-- Uses `[Console]::Write()` for performance
+- Queues all segments via `Write-Buffer`, then `Flush-Buffer` (or `Flush-Buffer -ClearFirst`) at the end
 - Shows random quote 2 lines below logo
 
 ### 7. Dialog System
@@ -373,14 +412,14 @@ Dialogs are modal functions that take control of input and rendering:
 9. Clear shadow and dialog area
 10. Restore cursor visibility
 
-**Dialog helper functions:**
+**Dialog helper functions** (all write through `Write-Buffer`, do NOT call `Flush-Buffer` themselves -- the caller decides when to flush):
 
 ```powershell
 # Draw a row with borders and background
-Write-SimpleDialogRow -text "Hello" -dialogX $x -dialogWidth $w -bgColor $bg -borderColor $border
+Write-SimpleDialogRow -x $x -y $y -width $w -content "Hello" -contentColor White -backgroundColor $bg
 
 # Draw an input field row
-Write-SimpleFieldRow -label "Value:" -value $val -fieldWidth 4 -dialogX $x -dialogWidth $w
+Write-SimpleFieldRow -x $x -y $y -width $w -label "Value:" -longestLabel $ll -fieldValue $val -fieldWidth 4 -fieldIndex 0 -currentFieldIndex $cur -backgroundColor $bg
 
 # Draw offset shadow effect
 Draw-DialogShadow -dialogX $x -dialogY $y -dialogWidth $w -dialogHeight $h -shadowColor DarkGray
@@ -394,7 +433,7 @@ return @{
 }
 ```
 
-### 8. Menu Item Bounds Tracking
+### 8. Menu Item Bounds Tracking & Click Detection
 
 For mouse click detection, menu items track their console coordinates:
 
@@ -409,37 +448,50 @@ $script:MenuItemsBounds += @{
 }
 ```
 
-Click detection in the wait loop:
+**Click detection uses `PeekConsoleInput` MOUSE_EVENT records.** The console input buffer provides native `MOUSE_EVENT` records with exact character cell coordinates (`dwMousePosition.X/Y`), eliminating all pixel-to-character conversion math. This is the same buffer used for keyboard and scroll detection.
+
+Click detection in the main loop's PeekConsoleInput block:
 
 ```powershell
-$clickPos = Get-MousePosition
-# Convert to console coordinates
-$consoleX = # ... (involves ScreenToClient and font size calculation)
-$consoleY = # ...
-
-foreach ($item in $script:MenuItemsBounds) {
-    if ($consoleY -eq $item.y -and $consoleX -ge $item.startX -and $consoleX -le $item.endX) {
-        $lastKeyPress = $item.hotkey  # Simulate hotkey press
-        break
+$script:ConsoleClickCoords = $null
+# Inside the existing PeekConsoleInput loop:
+if ($peekBuffer[$e].EventType -eq 0x0002) {  # MOUSE_EVENT
+    $mouseFlags = $peekBuffer[$e].MouseEvent.dwEventFlags
+    $mouseButtons = $peekBuffer[$e].MouseEvent.dwButtonState
+    if ($mouseFlags -eq 0 -and ($mouseButtons -band 0x0001) -ne 0) {  # Left button press
+        $script:ConsoleClickCoords = @{
+            X = $peekBuffer[$e].MouseEvent.dwMousePosition.X
+            Y = $peekBuffer[$e].MouseEvent.dwMousePosition.Y
+        }
     }
+}
+# After the peek loop, consume click events via ReadConsoleInput
+# Then match against dialog buttons and menu items:
+if ($null -ne $script:ConsoleClickCoords) {
+    $clickX = $script:ConsoleClickCoords.X
+    $clickY = $script:ConsoleClickCoords.Y
+    # Exact character cell comparisons:
+    if ($clickY -eq $bounds.buttonRowY -and $clickX -ge $bounds.startX -and $clickX -le $bounds.endX) { ... }
 }
 ```
 
+**Hit-testing uses exact character cell matching** — no tolerance, no pixel math, no expanded bounding boxes. Button and menu item bounds map to the exact visible characters (emoji+pipe+text). The `PeekConsoleInput` approach inherently handles focus (events only appear when the console is focused) and provides coordinates that match the console's own rendering.
+
+Dialog button click detection (in Show-TimeChangeDialog, Show-MovementModifyDialog, and Show-QuitConfirmationDialog) uses the same `PeekConsoleInput` pattern within each dialog's own input loop. Each dialog peeks for MOUSE_EVENT left button press records, consumes them via `ReadConsoleInput`, then matches against `$buttonRowY`, `$updateButtonStartX/$updateButtonEndX`, and `$cancelButtonStartX/$cancelButtonEndX` (all mapped to visible characters only).
+
+Show-MovementModifyDialog also supports **field click selection**: after button checks, clicks within the dialog area are matched against field Y offsets (`@(4, 5, 7, 8, 10, 11, 13)` relative to `$dialogY`). A matched field click switches `$currentField`, redraws only the two affected rows (previous and new selection), and repositions the cursor.
+
+**Important**: All three dialogs must clear `$script:DialogButtonBounds = $null` and `$script:DialogButtonClick = $null` in their cleanup code. The main loop's menu click detection is guarded by `$null -eq $script:DialogButtonBounds` — stale bounds will block all menu item clicks.
+
 ### 9. Emoji Handling
 
-Emojis display as 2 columns in the console but have string length of 1. The code accounts for this:
+Emojis display as 2 columns in the console but have string length of 1. With buffered rendering, emoji positions are computed statically (assuming 2 display cells) rather than reading `$Host.UI.RawUI.CursorPosition.X` after writing:
 
 ```powershell
-$pipeX = $itemStartX + 2  # Emoji takes 2 display columns
-Write-Host $emoji -NoNewline
-
-# Check actual cursor position after emoji
-$cursorAfterEmoji = [Console]::CursorPosition.X
-
-if ($cursorAfterEmoji -lt $pipeX) {
-    # Single-column emoji (like 👁️) - fill the gap
-    Write-Host " " -NoNewline -BackgroundColor $bg
-}
+$emojiX = $itemStartX
+$pipeX = $emojiX + 2  # Emoji takes 2 display columns
+Write-Buffer -X $emojiX -Y $menuY -Text $emoji -FG $iconColor -BG $bg
+Write-Buffer -X $pipeX -Y $menuY -Text "|" -FG $pipeColor -BG $bg
 ```
 
 **Common emojis used:**
@@ -480,16 +532,16 @@ Priority determines display order when truncating. Components with lower priorit
 
 Input detection uses four complementary mechanisms, each providing evidence for a specific input type:
 
-1. **`PeekConsoleInput`** (keyboard + scroll) - Peeks at the console input buffer for event records. Detects `KEY_EVENT` (EventType 0x0001) for keyboard and `MOUSE_EVENT` with scroll flag (EventType 0x0002, dwEventFlags 0x0004) for scroll wheel. Keyboard events are only **peeked** (not consumed) so the menu hotkey handler can still read them. Scroll events are consumed to prevent buffer buildup. The simulated Right Alt key (VK 0xA5) is filtered out. Only works when console is focused.
+1. **`PeekConsoleInput`** (keyboard + scroll + mouse clicks) - Peeks at the console input buffer for event records. Detects `KEY_EVENT` (EventType 0x0001) for keyboard, `MOUSE_EVENT` with scroll flag (EventType 0x0002, dwEventFlags 0x0004) for scroll wheel, and `MOUSE_EVENT` with left button press (dwEventFlags 0, dwButtonState & 0x0001) for click detection. Keyboard events are only **peeked** (not consumed) so the menu hotkey handler can still read them. Scroll and click events are consumed to prevent buffer buildup. The simulated Right Alt key (VK 0xA5) is filtered out. Only works when console is focused.
 
-2. **`GetAsyncKeyState`** (mouse buttons only) - Focused loop over VK codes 0x01-0x06 for click detection and menu/dialog interaction. Not used for keyboard.
+2. **`GetAsyncKeyState`** (mouse buttons only) - Focused loop over VK codes 0x01-0x06 for general input detection (pausing the jiggler). Not used for click-to-button mapping — that is handled entirely by PeekConsoleInput MOUSE_EVENT records.
 
 3. **`GetLastInputInfo`** (system-wide catch-all) - Passive API returning the timestamp of the last user input of any type. Used to set `$script:userInputDetected = $true` (pauses the jiggler). Also infers **mouse movement** when activity is detected but no keyboard, scroll, or click evidence was found by the other mechanisms.
 
 4. **`Test-MouseMoved`** (position polling) - Compares cursor position against previous check with a pixel threshold. Provides direct evidence of mouse movement.
 
 **Classification logic (evidence-based, inference by elimination):**
-- **Mouse clicks**: `GetAsyncKeyState` VK 0x01-0x06 → direct evidence
+- **Mouse clicks**: `PeekConsoleInput` MOUSE_EVENT left button press → direct evidence (with cell coords for button mapping); `GetAsyncKeyState` VK 0x01-0x06 → general detection for jiggler pause
 - **Scroll**: `PeekConsoleInput` MOUSE_EVENT with scroll flag → direct evidence
 - **Keyboard**: `PeekConsoleInput` KEY_EVENT records (excluding VK 0xA5) → direct evidence
 - **Mouse movement**: `Test-MouseMoved` position change → direct evidence; OR `GetLastInputInfo` activity with no keyboard/scroll/click evidence → inference by elimination
@@ -546,7 +598,7 @@ $script:NewComponentBg = "DarkBlue"
 
 2. Use in code:
 ```powershell
-Write-Host "text" -ForegroundColor $script:NewComponentColor -BackgroundColor $script:NewComponentBg
+Write-Buffer -Text "text" -FG $script:NewComponentColor -BG $script:NewComponentBg
 ```
 
 3. Update CONTEXT.md color categories table.
@@ -570,12 +622,16 @@ $script:NewParam = $NewParam
 
 1. Create function following pattern of `Show-TimeChangeDialog`
 2. Key elements:
-   - Save `$savedCursorVisible = [Console]::CursorVisible`
+   - Save `$savedCursorVisible = $script:CursorVisible`
    - Calculate centered position
-   - Call `Draw-DialogShadow`
-   - Draw dialog box with theme colors
-   - Input loop with resize detection
-   - Call `Clear-DialogShadow` before cleanup
+   - Queue all rendering via `Write-Buffer` (borders, content, fields, buttons)
+   - Call `Draw-DialogShadow` (also uses `Write-Buffer`)
+   - Call `Flush-Buffer` after the complete dialog is queued
+   - Input loop with resize detection (use `Flush-Buffer -ClearFirst` on resize)
+   - On field/input redraws: queue affected rows via `Write-Buffer`, then `Flush-Buffer`
+   - Cursor visibility: `$script:CursorVisible = $true; [Console]::Write("$($script:ESC)[?25h")` to show, `$script:CursorVisible = $false; [Console]::Write("$($script:ESC)[?25l")` to hide
+   - Call `Clear-DialogShadow` + queue clear area via `Write-Buffer`, then `Flush-Buffer`
+   - Restore `$script:CursorVisible = $savedCursorVisible` and write appropriate VT100 sequence
    - Return `@{ Result = $data; NeedsRedraw = $bool }`
 
 3. Add hotkey handler in wait loop (~line 5400)
@@ -689,14 +745,12 @@ The script simulates Right Alt (VK_RMENU = 0xA5) via `keybd_event`. After the si
 
 ### Emoji Display Width Variations
 
-Some emojis render as 1 column, others as 2. After writing an emoji, check the actual cursor position and fill gaps if needed:
+Some emojis render as 1 column, others as 2. With buffered rendering, emoji positions are computed statically (assuming 2 display cells) and explicit X positions are used after each emoji:
 
 ```powershell
-Write-Host $emoji -NoNewline
-$actualX = [Console]::CursorPosition.X
-if ($actualX -lt $expectedX) {
-    Write-Host (" " * ($expectedX - $actualX)) -NoNewline -BackgroundColor $bg
-}
+$emojiX = $startX
+Write-Buffer -X $emojiX -Y $row -Text $emoji -FG $color -BG $bg
+Write-Buffer -X ($emojiX + 2) -Y $row -Text "|rest" -FG $color -BG $bg
 ```
 
 ### Windows Terminal Color Override
@@ -781,19 +835,22 @@ No external dependencies - the script is fully self-contained.
 
 | Component | Approximate Lines |
 |-----------|------------------|
-| Parameters | 122-148 |
-| Theme Colors | 214-289 |
-| Box Characters | 203-212 |
-| P/Invoke Types | 780-1050 |
-| Get-MousePosition | 460-500 |
-| Draw-ResizeLogo | 2824-2950 |
-| Show-MovementModifyDialog | 1600-2400 |
-| Show-QuitConfirmationDialog | 2400-2600 |
-| Show-TimeChangeDialog | 2600-2800 |
-| Main Loop Start | 4619 |
-| Wait Loop | 4671-5400 |
-| Resize Handling | 5600-5800 |
-| UI Rendering | 6200-7200 |
-| Menu Rendering | 7063-7350 |
+| Parameters | 41-120 |
+| Box Characters | 124-132 |
+| Theme Colors | 134-210 |
+| Buffered Rendering Functions | 1454-1515 |
+| P/Invoke Types | 700-900 |
+| Draw-DialogShadow / Clear-DialogShadow | 1518-1555 |
+| Show-TimeChangeDialog | 1557-2220 |
+| Draw-ResizeLogo | 2225-2320 |
+| Get-MousePosition / Test-MouseMoved | 2326-2355 |
+| Write-SimpleDialogRow / Write-SimpleFieldRow | 2409-2475 |
+| Show-MovementModifyDialog | 2478-3215 |
+| Show-QuitConfirmationDialog | 3219-3600 |
+| Main Loop Start | 3654 |
+| Wait Loop | 3706-4400 |
+| Resize Handling | 4400-4800 |
+| UI Rendering | 5000-5930 |
+| Menu Rendering | 5600-5930 |
 
 *Note: Line numbers are approximate and may shift as code is modified.*
