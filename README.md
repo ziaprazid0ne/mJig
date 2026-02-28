@@ -11,10 +11,13 @@ A feature-rich PowerShell mouse jiggler with a console-based TUI, designed to ke
 - **Multiple View Modes**: Full, minimal, or hidden interface
 - **Interactive Dialogs**: Modify settings on-the-fly without restarting
 - **Mouse Stutter Prevention**: Waits for mouse to settle before starting next movement cycle
-- **Window Resize Handling**: Beautiful centered logo with playful quotes during resize
+- **Startup Screen**: Loading and initialization-complete screens on startup; auto-continues after 7 seconds if parameters were passed, otherwise waits for a keypress
+- **Unified Window Resize Handling**: Centered logo with playful quotes during resize from any screen (startup, main loop, hidden mode); stays open while the mouse button is held so the UI never dismisses mid-drag
 - **Themeable UI**: Centralized color variables for easy customization
 - **Stats Box**: Real-time display of detected input categories (Mouse, Keyboard, mouse buttons, Scroll/Other) and movement statistics
-- **Click Support**: Mouse-clickable menu buttons and dialog interactions
+- **Polished Click Interactions**: Buttons highlight on press (mouse down), fire on release (mouse up); dragging off before releasing cancels the click
+- **Per-Button Color Theming**: Each button carries its own normal and onclick color set; pressed-state colors are resolved per-button at render time
+- **Popup Indicator**: The button that opened a dialog stays highlighted for the full lifetime of that dialog; toggle-action buttons restore instantly
 - **Flicker-Free Rendering**: VT100/ANSI escape sequence rendering with atomic single-write frame output
 
 ## Requirements
@@ -82,7 +85,7 @@ While running, use these keyboard shortcuts:
 | `h` | Toggle hidden mode |
 | `m` | Open movement settings dialog (full view only) |
 
-You can also click menu buttons with your mouse.
+You can also click menu buttons with your mouse. Buttons respond visually on press (onclick highlight color) and fire the action on release. Dragging the mouse off a button before releasing cancels the action. When a button opens a dialog, it stays highlighted for the duration of that dialog to indicate which menu is active.
 
 ### Dialogs
 
@@ -125,7 +128,7 @@ Movement and timing can be adjusted via:
 ### Theme Customization
 
 Colors are defined as `$script:` variables in the Theme Colors section (around line 214). Groups include:
-- Menu bar colors
+- Menu bar colors — normal state (`MenuButtonBg`, `MenuButtonText`, `MenuButtonHotkey`, `MenuButtonPipe`) and pressed/onclick state (`MenuButtonOnClickBg`, `MenuButtonOnClickFg`, `MenuButtonOnClickHotkey`)
 - Header colors
 - Stats box colors
 - Dialog colors (Quit, Time, Movement)

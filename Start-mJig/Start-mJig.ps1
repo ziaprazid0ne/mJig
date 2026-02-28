@@ -119,6 +119,10 @@ function Start-mJig {
 	$script:LastClickLogTime = $null  # Track when we last logged a click to prevent duplicate logs
 	$script:WindowTitle = "mJig - mJigg"  # Fixed window title (same for all instances to enable duplicate detection)
 	$script:MenuClickHotkey = $null  # Menu item hotkey triggered by mouse click
+	$script:PressedMenuButton  = $null   # hotkey of the menu button currently held down (LMB pressed, not yet released)
+	$script:ButtonClickedAt   = $null   # timestamp of confirmed click (LMB UP over button); used to time color restoration
+	$script:PendingDialogCheck = $false  # set on confirmed click; render loop uses it to decide whether to clear pressed state
+	$script:LButtonWasDown    = $false   # tracks previous LMB state from console events for UP-transition detection
 	$script:RenderQueue = New-Object 'System.Collections.Generic.List[hashtable]'
 	
 	# Box-drawing characters (using Unicode code points to avoid encoding issues)
@@ -140,6 +144,10 @@ function Start-mJig {
 	$script:MenuButtonText = "White"
 	$script:MenuButtonHotkey = "Green"
 	$script:MenuButtonPipe = "White"
+	# Pressed / onclick state colors (applied when the user holds LMB on a button)
+	$script:MenuButtonOnClickBg = "DarkCyan"
+	$script:MenuButtonOnClickFg = "Black"
+	$script:MenuButtonOnClickHotkey = "Black"
 	
 	# Main Display - Header
 	$script:HeaderAppName = "Magenta"
@@ -199,6 +207,7 @@ function Start-mJig {
 	$script:ResizeLogoName = "Magenta"
 	$script:ResizeLogoIcon = "White"
 	$script:ResizeQuoteText = "White"
+	$script:ResizeLogoLockedHeight = $null   # height locked at resize-start; ignores ±1 transient fluctuations
 	
 	# General UI
 	$script:TextDefault = "White"
@@ -208,6 +217,298 @@ function Start-mJig {
 	$script:TextWarning = "Yellow"
 	$script:TextError = "Red"
 	
+	# ============================================================================
+	# Startup / Initializing Screen
+	# ============================================================================
+
+	# Shown immediately at startup — VT100 not yet enabled so Write-Host is used.
+	function Show-StartupScreen {
+		[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+		try { [Console]::Clear() } catch {}
+
+		$sw    = try { $Host.UI.RawUI.WindowSize.Width  } catch { 80 }
+		$sh    = try { $Host.UI.RawUI.WindowSize.Height } catch { 24 }
+		$boxW  = [Math]::Min(58, $sw - 4)
+		$pad   = " " * [Math]::Max(0, [Math]::Floor(($sw - $boxW) / 2))
+		$inner = $boxW - 2
+		$hLine = [string]$script:BoxHorizontal
+		$top   = $script:BoxTopLeft  + ($hLine * ($boxW - 2)) + $script:BoxTopRight
+		$div   = $script:BoxVerticalRight + ($hLine * ($boxW - 2)) + $script:BoxVerticalLeft
+		$bot   = $script:BoxBottomLeft + ($hLine * ($boxW - 2)) + $script:BoxBottomRight
+		$blank = $script:BoxVertical + (" " * $inner) + $script:BoxVertical
+
+		$vertGap = [Math]::Max(0, [Math]::Floor($sh / 2) - 5)
+		for ($i = 0; $i -lt $vertGap; $i++) { Write-Host "" }
+
+		Write-Host "$pad$top"  -ForegroundColor Cyan
+		Write-Host "$pad$($script:BoxVertical)$("  mJig  |  Initializing".PadRight($inner))$($script:BoxVertical)" -ForegroundColor Cyan
+		Write-Host "$pad$div"  -ForegroundColor Cyan
+		Write-Host "$pad$blank" -ForegroundColor Cyan
+		Write-Host "$pad$($script:BoxVertical)$("  Initializing...".PadRight($inner))$($script:BoxVertical)" -ForegroundColor White
+		Write-Host "$pad$blank" -ForegroundColor Cyan
+		Write-Host "$pad$bot"  -ForegroundColor Cyan
+	}
+
+	# Shown after initialization completes. By this point VT100 and UTF-8 are set up.
+	function Show-StartupComplete {
+		param([bool]$HasParams)
+
+		$endTimeDisplay    = if ($EndTime -and $EndTime -ne "0") { $EndTime } else { "none" }
+		$autoResumeDisplay = if ($script:AutoResumeDelaySeconds -gt 0) { "$($script:AutoResumeDelaySeconds)s" } else { "off" }
+
+		# Always-on resize diagnostic — does not require -Diag flag.
+		# Run the script, resize during the welcome screen, then read: Get-Content ".\_diag\welcome.txt"
+		$_wDiagDir  = Join-Path (Split-Path $PSScriptRoot -Parent) "_diag"
+		$_wDiagFile = Join-Path $_wDiagDir "welcome.txt"
+		try {
+			if (-not (Test-Path $_wDiagDir)) { New-Item -ItemType Directory -Path $_wDiagDir -Force | Out-Null }
+			"=== Welcome Screen Resize Diag: $(Get-Date -Format 'HH:mm:ss.fff') ===" | Out-File $_wDiagFile -Encoding utf8
+		} catch { $_wDiagFile = $null }
+		function wLog { param([string]$msg)
+			if ($null -ne $_wDiagFile) {
+				try { "$(Get-Date -Format 'HH:mm:ss.fff') $msg" | Out-File $_wDiagFile -Append -Encoding utf8 } catch {}
+			}
+		}
+
+		function drawCompleteScreen {
+			param([string]$PromptText)
+
+			$sw    = try { $Host.UI.RawUI.WindowSize.Width  } catch { 80 }
+			$sh    = try { $Host.UI.RawUI.WindowSize.Height } catch { 24 }
+			wLog "drawCompleteScreen: PShost sw=$sw sh=$sh  prompt='$PromptText'"
+			$boxW  = [Math]::Min(58, $sw - 4)
+			$pad   = " " * [Math]::Max(0, [Math]::Floor(($sw - $boxW) / 2))
+			$inner = $boxW - 2
+			$hLine = [string]$script:BoxHorizontal
+			$top   = $script:BoxTopLeft  + ($hLine * ($boxW - 2)) + $script:BoxTopRight
+			$div   = $script:BoxVerticalRight + ($hLine * ($boxW - 2)) + $script:BoxVerticalLeft
+			$bot   = $script:BoxBottomLeft + ($hLine * ($boxW - 2)) + $script:BoxBottomRight
+			$blank = $script:BoxVertical + (" " * $inner) + $script:BoxVertical
+
+			$vertGap = [Math]::Max(0, [Math]::Floor($sh / 2) - 10)
+			try { [Console]::Clear() } catch {}
+			for ($i = 0; $i -lt $vertGap; $i++) { Write-Host "" }
+
+			Write-Host "$pad$top"  -ForegroundColor Cyan
+			Write-Host "$pad$($script:BoxVertical)$("  mJig  |  Initialization Complete".PadRight($inner))$($script:BoxVertical)" -ForegroundColor Cyan
+			Write-Host "$pad$div"  -ForegroundColor Cyan
+			Write-Host "$pad$blank" -ForegroundColor Cyan
+			Write-Host "$pad$($script:BoxVertical)$("  Initialization complete".PadRight($inner))$($script:BoxVertical)" -ForegroundColor Green
+			Write-Host "$pad$blank" -ForegroundColor Cyan
+			Write-Host "$pad$($script:BoxVertical)$("  Output:      $Output".PadRight($inner))$($script:BoxVertical)"  -ForegroundColor White
+			Write-Host "$pad$($script:BoxVertical)$("  Interval:    $($script:IntervalSeconds)s  (variance: +-$($script:IntervalVariance)s)".PadRight($inner))$($script:BoxVertical)" -ForegroundColor White
+			Write-Host "$pad$($script:BoxVertical)$("  Distance:    $($script:TravelDistance)px  (variance: +-$($script:TravelVariance)px)".PadRight($inner))$($script:BoxVertical)" -ForegroundColor White
+			Write-Host "$pad$($script:BoxVertical)$("  Move speed:  $($script:MoveSpeed)s  (variance: +-$($script:MoveVariance)s)".PadRight($inner))$($script:BoxVertical)" -ForegroundColor White
+			Write-Host "$pad$($script:BoxVertical)$("  End time:    $endTimeDisplay".PadRight($inner))$($script:BoxVertical)" -ForegroundColor White
+			Write-Host "$pad$($script:BoxVertical)$("  Auto-resume: $autoResumeDisplay".PadRight($inner))$($script:BoxVertical)" -ForegroundColor White
+			Write-Host "$pad$blank" -ForegroundColor Cyan
+			Write-Host "$pad$div"   -ForegroundColor Cyan
+			Write-Host "$pad$blank" -ForegroundColor Cyan
+			Write-Host "$pad$($script:BoxVertical)$("  $PromptText".PadRight($inner))$($script:BoxVertical)" -ForegroundColor Yellow
+			Write-Host "$pad$blank" -ForegroundColor Cyan
+			Write-Host "$pad$bot"   -ForegroundColor Cyan
+		}
+
+		# Read current window size via direct Win32 GetConsoleScreenBufferInfo P/Invoke.
+		# This bypasses every PowerShell and .NET abstraction layer that might cache a stale value.
+		# srWindow is the visible console window rectangle; width = Right-Left+1, height = Bottom-Top+1.
+		function getSize {
+			try {
+				$_csbi = New-Object mJiggAPI.CONSOLE_SCREEN_BUFFER_INFO
+				$_hOut = [mJiggAPI.Mouse]::GetStdHandle(-11)   # STD_OUTPUT_HANDLE
+				$_ok   = [mJiggAPI.Mouse]::GetConsoleScreenBufferInfo($_hOut, [ref]$_csbi)
+				wLog "getSize CSBI ok=$_ok  bufW=$($_csbi.dwSize.X) bufH=$($_csbi.dwSize.Y)  win=L$($_csbi.srWindow.Left),T$($_csbi.srWindow.Top),R$($_csbi.srWindow.Right),B$($_csbi.srWindow.Bottom)  => W=$([int]($_csbi.srWindow.Right-$_csbi.srWindow.Left+1)) H=$([int]($_csbi.srWindow.Bottom-$_csbi.srWindow.Top+1))  PShost=W=$($Host.UI.RawUI.WindowSize.Width),H=$($Host.UI.RawUI.WindowSize.Height)"
+				if ($_ok) {
+					return @{
+						W = [int]($_csbi.srWindow.Right  - $_csbi.srWindow.Left + 1)
+						H = [int]($_csbi.srWindow.Bottom - $_csbi.srWindow.Top  + 1)
+					}
+				}
+			} catch {
+				wLog "getSize EXCEPTION: $($_.Exception.Message)"
+			}
+			wLog "getSize FALLBACK => W=$($Host.UI.RawUI.WindowSize.Width) H=$($Host.UI.RawUI.WindowSize.Height)"
+			@{ W = $Host.UI.RawUI.WindowSize.Width; H = $Host.UI.RawUI.WindowSize.Height }
+		}
+
+		# Drain the entire input buffer and return $true if a genuine keypress was found.
+		# Rules:
+		#   - Must use IncludeKeyDown,IncludeKeyUp: IncludeKeyDown-only causes ReadKey to BLOCK
+		#     on KeyUp events (waits for the next KeyDown), freezing the polling loop.
+		#   - Must drain ALL events before returning, not stop at the first non-wake key.
+		#     Send-ResizeExitWakeKey injects VK_RMENU (165). The console input buffer reports
+		#     this as VK_MENU (18), not 165. A stale KeyUp from a previous key can cause an early
+		#     return that leaves the VK_MENU event behind; on the next tick it counts as a real
+		#     keypress and dismisses the screen without user input.
+		#   - Modifier keys (Shift/Ctrl/Alt and their L/R variants) are never "press any key".
+		$_wakeVKs = @(16, 17, 18, 160, 161, 162, 163, 164, 165)  # Shift, Ctrl, Alt + L/R variants
+		function drainWakeKeys {
+			$_real = $false
+			try {
+				while ($Host.UI.RawUI.KeyAvailable) {
+					$k = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown,IncludeKeyUp,AllowCtrlC")
+					wLog "drainWakeKeys: VK=$($k.VirtualKeyCode) KeyDown=$($k.KeyDown)"
+					if ($k.KeyDown -and $k.VirtualKeyCode -notin $_wakeVKs) { $_real = $true }
+				}
+			} catch { wLog "drainWakeKeys EXCEPTION: $($_.Exception.Message)" }
+			return $_real
+		}
+
+		# Self-contained resize handler for the welcome screen.
+		# Intentionally does NOT call Invoke-ResizeHandler or Send-ResizeExitWakeKey —
+		# those are for the main loop.  Draws the logo directly, waits for stability,
+		# then redraws the welcome-screen box.
+		function handleResize {
+			param([string]$PromptText)
+			$script:CurrentResizeQuote     = $null
+			$script:ResizeLogoLockedHeight = $null
+			$_hrHOut = [mJiggAPI.Mouse]::GetStdHandle(-11)  # STD_OUTPUT_HANDLE for CSBI
+			$_hrCsbi = New-Object mJiggAPI.CONSOLE_SCREEN_BUFFER_INFO
+			$sz  = getSize
+			$rW  = $sz.W
+			$rH  = $sz.H
+			$rSz = New-Object System.Management.Automation.Host.Size($rW, $rH)
+			try { Draw-ResizeLogo -ClearFirst -WindowSize $rSz } catch { try { [Console]::Clear() } catch {} }
+			$lastChange = Get-Date
+			while ($true) {
+				Start-Sleep -Milliseconds 10
+				# Read size directly from Win32 — no PS host, no .NET caching layer.
+				$nW = $rW; $nH = $rH
+				try {
+					if ([mJiggAPI.Mouse]::GetConsoleScreenBufferInfo($_hrHOut, [ref]$_hrCsbi)) {
+						$nW = [int]($_hrCsbi.srWindow.Right  - $_hrCsbi.srWindow.Left + 1)
+						$nH = [int]($_hrCsbi.srWindow.Bottom - $_hrCsbi.srWindow.Top  + 1)
+					}
+				} catch {}
+				if ($nW -ne $rW -or $nH -ne $rH) {
+					$rW = $nW; $rH = $nH
+					$rSz = New-Object System.Management.Automation.Host.Size($rW, $rH)
+					$lastChange = Get-Date
+					try { Draw-ResizeLogo -ClearFirst -WindowSize $rSz } catch {}
+				}
+				$elapsed = ((Get-Date) - $lastChange).TotalMilliseconds
+				if ($elapsed -ge 1500) {
+					$lmb = $false
+					try { $lmb = ([mJiggAPI.Mouse]::GetAsyncKeyState(0x01) -band 0x8000) -ne 0 } catch {}
+					if (-not $lmb) { break }
+				}
+			}
+			wLog "handleResize: resize loop exited, clearing screen and redrawing welcome"
+			try { [Console]::Clear() } catch { wLog "handleResize: Clear EXCEPTION: $($_.Exception.Message)" }
+			try { Restore-ConsoleInputMode } catch { wLog "handleResize: RestoreInputMode EXCEPTION: $($_.Exception.Message)" }
+			wLog "handleResize: calling drainWakeKeys before redraw"
+			$null = drainWakeKeys
+			wLog "handleResize: calling drawCompleteScreen '$PromptText'"
+			drawCompleteScreen $PromptText
+			wLog "handleResize: drawCompleteScreen returned, handleResize exiting"
+		}
+
+		if (-not $HasParams) {
+			# Wait for a real keypress; call handleResize when window size changes.
+			drawCompleteScreen "Press any key to continue..."
+			# Prime Windows Terminal's input routing before polling begins.
+			try { Restore-ConsoleInputMode } catch {}
+			try { Send-ResizeExitWakeKey   } catch {}
+			wLog "--- POLL START (no-params branch) ---"
+			$lastSize   = getSize
+			wLog "baseline lastSize W=$($lastSize.W) H=$($lastSize.H)"
+			$null = drainWakeKeys   # consume the synthetic wake key before real keypress detection
+			$keyPressed = $false
+			$_pollTick  = 0
+			while (-not $keyPressed) {
+				Start-Sleep -Milliseconds 50
+				$_pollTick++
+				$curSize = getSize
+				if ($curSize.W -ne $lastSize.W -or $curSize.H -ne $lastSize.H) {
+					wLog "RESIZE DETECTED tick=$_pollTick  last=W$($lastSize.W)xH$($lastSize.H)  cur=W$($curSize.W)xH$($curSize.H) -- calling handleResize"
+					handleResize "Press any key to continue..."
+					wLog "outer loop: handleResize returned, updating lastSize"
+					$lastSize = getSize
+					wLog "outer loop: post-handleResize lastSize W=$($lastSize.W) H=$($lastSize.H) -- resuming poll"
+				} elseif ($_pollTick % 20 -eq 0) {
+					wLog "tick=$_pollTick no-change W=$($curSize.W) H=$($curSize.H)"
+				}
+				$_ka = $Host.UI.RawUI.KeyAvailable
+				if ($_pollTick % 20 -eq 0) { wLog "tick=$_pollTick KeyAvailable=$_ka" }
+				if ($_ka) {
+					wLog "KeyAvailable=true at tick=$_pollTick -- calling drainWakeKeys"
+					if (drainWakeKeys) { $keyPressed = $true }
+				}
+			}
+			wLog "--- POLL END (keyPressed=$keyPressed) ---"
+		} else {
+			# Countdown; call handleResize on resize, redraw each second.
+			# Prime input routing before the countdown polling loop starts.
+			try { Restore-ConsoleInputMode } catch {}
+			try { Send-ResizeExitWakeKey   } catch {}
+			$null = drainWakeKeys
+			$lastSize = getSize
+			for ($i = 7; $i -gt 0; $i--) {
+				$secs = if ($i -eq 1) { "second" } else { "seconds" }
+				drawCompleteScreen "Starting in $i $secs...  (any key to skip)"
+				$lastSize = getSize
+				for ($ms = 0; $ms -lt 10; $ms++) {
+					Start-Sleep -Milliseconds 100
+					$curSize = getSize
+					if ($curSize.W -ne $lastSize.W -or $curSize.H -ne $lastSize.H) {
+						handleResize "Starting in $i $secs...  (any key to skip)"
+						$lastSize = getSize
+					}
+					if ($Host.UI.RawUI.KeyAvailable) {
+						if (drainWakeKeys) { return }
+					}
+				}
+			}
+		}
+	}
+
+	# Unified resize handler — blocks until the window is stable and LMB is released.
+	# Draws the resize logo in normal mode, or a blank screen in hidden mode.
+	# Returns the final stable [System.Management.Automation.Host.Size] object.
+	# Can be called from any context after initialization (startup screen, main loop, etc.).
+	function Invoke-ResizeHandler {
+		$psw       = (Get-Host).UI.RawUI
+		$drawCount = 0
+		$script:CurrentResizeQuote     = $null
+		$script:ResizeLogoLockedHeight = $null
+		$pendingSize  = $psw.WindowSize
+		$lastDetected = Get-Date
+
+		if ($Output -eq "hidden") {
+			[Console]::Clear()
+		} else {
+			Draw-ResizeLogo -ClearFirst -WindowSize $pendingSize
+		}
+
+		while ($true) {
+			Start-Sleep -Milliseconds 1
+			$newSize   = $psw.WindowSize
+			$isNewSize = ($newSize.Width -ne $pendingSize.Width -or $newSize.Height -ne $pendingSize.Height)
+
+			if ($isNewSize) {
+				$pendingSize  = $newSize
+				$lastDetected = Get-Date
+				if ($Output -ne "hidden") {
+					$drawCount++
+					if ($drawCount % 50 -eq 0) { [Console]::Clear(); Restore-ConsoleInputMode }
+					Draw-ResizeLogo -ClearFirst -WindowSize $newSize
+				}
+			}
+
+			# Stability + LMB gate: only exit once size is stable AND mouse is released
+			$elapsed = ((Get-Date) - $lastDetected).TotalMilliseconds
+			if ($elapsed -ge $ResizeThrottleMs) {
+				$lmbHeld = ([mJiggAPI.Mouse]::GetAsyncKeyState(0x01) -band 0x8000) -ne 0
+				if (-not $lmbHeld) {
+					[Console]::Clear()
+					Restore-ConsoleInputMode
+					Send-ResizeExitWakeKey
+					return $pendingSize
+				}
+			}
+		}
+	}
+
 	# Function to find window handle using EnumWindows (like Get-ProcessWindow.ps1)
 	function Find-WindowHandle {
 		param(
@@ -393,12 +694,12 @@ function Start-mJig {
 		}
 	}
 	
-	# Clear console first before any debug output
+	# Show initializing screen (or plain clear for DebugMode)
 	if ($Output -ne "hidden") {
-		try {
-			Clear-Host
-		} catch {
-			# Silently ignore - console might not be clearable
+		if (-not $DebugMode) {
+			Show-StartupScreen
+		} else {
+			try { Clear-Host } catch {}
 		}
 	}
 	
@@ -637,7 +938,7 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 		# Diagnostics - initialize folder and file paths
 		$script:DiagEnabled = $Diag
 		if ($script:DiagEnabled) {
-			$script:DiagFolder = Join-Path $PSScriptRoot "_diag"
+			$script:DiagFolder = Join-Path (Split-Path $PSScriptRoot -Parent) "_diag"
 			if (-not (Test-Path $script:DiagFolder)) {
 				New-Item -ItemType Directory -Path $script:DiagFolder -Force | Out-Null
 			}
@@ -1269,79 +1570,97 @@ namespace mJiggAPI {
 				$movementTimeMs = 50
 			}
 			
-			# Calculate number of points based on distance and time
-			# More points for longer distances and longer times
-			# Aim for roughly 1 point per 5-10 pixels, but adjust based on time
-			$basePoints = [Math]::Max(2, [Math]::Floor($distance / 8))
-			$timeBasedPoints = [Math]::Max(2, [Math]::Floor($movementTimeMs / 20))  # ~1 point per 20ms
-			$numPoints = [Math]::Max(2, [Math]::Min($basePoints, $timeBasedPoints))
+		# Generate one point per 5ms of movement time so the execution loop can advance
+		# at a constant 5ms interval. Acceleration/deceleration is expressed by point
+		# spacing along the curve (easing places points close together when the virtual
+		# speed is low, and far apart when it is high) rather than by varying the sleep
+		# duration. Duplicate pixel coordinates are fine - the cursor simply dwells there
+		# for one 5ms tick. t is always increasing so the cursor never moves backwards.
+		$numPoints = [Math]::Max(2, [Math]::Ceiling($movementTimeMs / 5))
+		$numPoints = [Math]::Min($numPoints, 2000)  # safety cap (~10 seconds at 5ms/step)
 			
-			# Randomly determine if we should apply a curve (chance of 0 = straight line)
-			# Curve amount: 0 = straight line, > 0 = curved path
-			# Maximum curve is 30% of the distance, with 30% chance of no curve
-			$curveChance = Get-Random -Minimum 0 -Maximum 100
-			$curveAmount = 0
-			if ($curveChance -ge 30) {
-				# Apply a curve - random amount between 5% and 30% of distance
-				$curvePercent = Get-Random -Minimum 5 -Maximum 31  # 5-30%
-				$curveAmount = ($distance * $curvePercent) / 100
+		# Perpendicular unit vector (left of travel direction) used for lateral arc offsets
+		$perpendicularX = 0.0
+		$perpendicularY = 0.0
+		if ($distance -gt 0) {
+			$perpendicularX = -$deltaY / $distance
+			$perpendicularY =  $deltaX / $distance
+		}
+
+		# Start arc — window [0, 0.3], peaks at t=0.15: curve develops quickly after departure.
+		# Amplitude 1-10% of distance (was 5-20%), and only present ~50% of the time so it
+		# ranges naturally from nonexistent to subtle.
+		$startArcAmount = 0.0
+		$startArcSign   = 1
+		if ((Get-Random -Minimum 0 -Maximum 100) -ge 50) {
+			$startArcAmount = $distance * (Get-Random -Minimum 1 -Maximum 11) / 100  # 1-10%
+			$startArcSign   = if ((Get-Random -Maximum 2) -eq 0) { 1 } else { -1 }
+		}
+
+		# Body curve — subtle background curve over the remaining 70% of travel [0.3, 1].
+		# Randomly U-shaped (half-sine: bows one way and returns) or S-shaped (full-sine:
+		# crosses sides at the midpoint). Amplitude 3-10% of distance keeps it natural.
+		$bodyCurveAmount = 0.0
+		$bodyCurveSign   = 1
+		$bodyCurveType   = 0  # 0 = U-shape (half-sine), 1 = S-shape (full-sine)
+		if ((Get-Random -Minimum 0 -Maximum 100) -ge 40) {  # 60% chance
+			$bodyCurveAmount = $distance * (Get-Random -Minimum 3 -Maximum 11) / 100  # 3-10%
+			$bodyCurveSign   = if ((Get-Random -Maximum 2) -eq 0) { 1 } else { -1 }
+			$bodyCurveType   = Get-Random -Maximum 2  # 0 = U, 1 = S
+		}
+
+		# Generate points with acceleration/deceleration curve and optional path curve
+		# Use ease-in-out-cubic: accelerates in first half, decelerates in second half
+		$points = @()
+		for ($i = 0; $i -le $numPoints; $i++) {
+			# Normalized progress (0 to 1)
+			$t = $i / $numPoints
+			
+			# Ease-in-out-cubic function: accelerates then decelerates
+			# f(t) = t < 0.5 ? 4t³ : 1 - pow(-2t + 2, 3)/2
+			if ($t -lt 0.5) {
+				$easedT = 4 * $t * $t * $t
+			} else {
+				$easedT = 1 - [Math]::Pow(-2 * $t + 2, 3) / 2
 			}
 			
-			# Calculate perpendicular direction for curve offset
-			# Perpendicular vector: (-deltaY, deltaX) normalized
-			$perpendicularX = 0
-			$perpendicularY = 0
-			if ($curveAmount -gt 0) {
-				$normalizedLength = [Math]::Sqrt($deltaX * $deltaX + $deltaY * $deltaY)
-				if ($normalizedLength -gt 0) {
-					$perpendicularX = -$deltaY / $normalizedLength
-					$perpendicularY = $deltaX / $normalizedLength
-				}
-				# Randomly choose curve direction (left or right)
-				$curveDirection = Get-Random -Maximum 2  # 0 or 1
-				if ($curveDirection -eq 0) {
-					$perpendicularX = -$perpendicularX
-					$perpendicularY = -$perpendicularY
-				}
-			}
+			# Calculate base position along straight path
+			$baseX = $startX + $deltaX * $easedT
+			$baseY = $startY + $deltaY * $easedT
 			
-			# Generate points with acceleration/deceleration curve and optional path curve
-			# Use ease-in-out-cubic: accelerates in first half, decelerates in second half
-			$points = @()
-			for ($i = 0; $i -le $numPoints; $i++) {
-				# Normalized progress (0 to 1)
-				$t = $i / $numPoints
-				
-				# Ease-in-out-cubic function: accelerates then decelerates
-				# f(t) = t < 0.5 ? 4t³ : 1 - pow(-2t + 2, 3)/2
-				if ($t -lt 0.5) {
-					$easedT = 4 * $t * $t * $t
+			# Start arc: window [0, 0.3] → peaks at t=0.15
+			if ($startArcAmount -gt 0 -and $t -le 0.3) {
+				$lateralOffset = $startArcSign * $startArcAmount * [Math]::Sin([Math]::PI * $t / 0.3)
+				$baseX += $perpendicularX * $lateralOffset
+				$baseY += $perpendicularY * $lateralOffset
+			}
+
+			# Body curve: window [0.3, 1] — both shapes use squared-sine envelopes so the
+			# derivative is zero at both window boundaries (smooth departure AND smooth landing).
+			#   U-shape: sin(π·bodyT)²                     — always same side, peaks at t=0.65
+			#   S-shape: sin(2π·bodyT) · sin(π·bodyT)      — crosses sides at t=0.65
+			# Neither shape produces a hook; both glide naturally into the endpoint.
+			if ($bodyCurveAmount -gt 0 -and $t -ge 0.3) {
+				$bodyT   = ($t - 0.3) / 0.7  # normalise to [0,1] over the body segment
+				$sinBase = [Math]::Sin([Math]::PI * $bodyT)
+				$bodyArc = if ($bodyCurveType -eq 0) {
+					$bodyCurveAmount * $sinBase * $sinBase                            # U-shape
 				} else {
-					$easedT = 1 - [Math]::Pow(-2 * $t + 2, 3) / 2
+					$bodyCurveAmount * [Math]::Sin(2 * [Math]::PI * $bodyT) * $sinBase  # S-shape
 				}
-				
-				# Calculate base position along straight path
-				$baseX = $startX + $deltaX * $easedT
-				$baseY = $startY + $deltaY * $easedT
-				
-				# Apply curve offset if curveAmount > 0
-				# Use quadratic curve: offset is maximum at midpoint (t=0.5) and 0 at start/end
-				# This creates a smooth arc: offset = curveAmount * 4 * t * (1 - t)
-				if ($curveAmount -gt 0) {
-					$curveOffset = $curveAmount * 4 * $t * (1 - $t)  # Quadratic curve: peaks at t=0.5
-					$baseX = $baseX + $perpendicularX * $curveOffset
-					$baseY = $baseY + $perpendicularY * $curveOffset
-				}
-				
-				# Round to integer pixel coordinates
-				$x = [Math]::Round($baseX)
-				$y = [Math]::Round($baseY)
-				
-				$points += [PSCustomObject]@{
-					X = $x
-					Y = $y
-				}
+				$baseX += $perpendicularX * $bodyCurveSign * $bodyArc
+				$baseY += $perpendicularY * $bodyCurveSign * $bodyArc
 			}
+			
+			# Round to integer pixel coordinates
+			$x = [Math]::Round($baseX)
+			$y = [Math]::Round($baseY)
+			
+			$points += [PSCustomObject]@{
+				X = $x
+				Y = $y
+			}
+		}
 			
 			return @{
 				Points = $points
@@ -1512,6 +1831,53 @@ namespace mJiggAPI {
 
 		function Clear-Buffer {
 			$script:RenderQueue.Clear()
+		}
+
+		# Immediately renders a single menu button with the given colors and flushes to console.
+		# Used for instant press/release visual feedback without waiting for the next full frame.
+		# Requires the bounds entry to include displayText (string) and format (int: 0=emoji, 1/2=text).
+		function Write-ButtonImmediate {
+			param($btn, $fg, $bg, $hotkeyFg)
+			$text   = $btn.displayText
+			$startX = $btn.startX
+			$y      = $btn.y
+			if ($btn.format -eq 0) {
+				# Emoji format: "emoji|label (k) text"
+				$parts = $text -split "\|", 2
+				if ($parts.Count -eq 2) {
+					Write-Buffer -X $startX -Y $y -Text $parts[0] -BG $bg -Wide
+					$pipeX = $startX + 2
+					Write-Buffer -X $pipeX -Y $y -Text "|" -FG $fg -BG $bg
+					$textParts = $parts[1] -split "([()])"
+					for ($j = 0; $j -lt $textParts.Count; $j++) {
+						$part = $textParts[$j]
+						if ($part -eq "(" -and $j+2 -lt $textParts.Count -and $textParts[$j+1] -match '^[a-z]$' -and $textParts[$j+2] -eq ")") {
+							Write-Buffer -Text "(" -FG $fg -BG $bg
+							Write-Buffer -Text $textParts[$j+1] -FG $hotkeyFg -BG $bg
+							Write-Buffer -Text ")" -FG $fg -BG $bg
+							$j += 2
+						} elseif ($part -ne "") {
+							Write-Buffer -Text $part -FG $fg -BG $bg
+						}
+					}
+				}
+			} else {
+				# Text-only formats (noIcons / short)
+				Write-Buffer -X $startX -Y $y -Text "" -BG $bg
+				$textParts = $text -split "([()])"
+				for ($j = 0; $j -lt $textParts.Count; $j++) {
+					$part = $textParts[$j]
+					if ($part -eq "(" -and $j+2 -lt $textParts.Count -and $textParts[$j+1] -match '^[a-z]$' -and $textParts[$j+2] -eq ")") {
+						Write-Buffer -Text "(" -FG $fg -BG $bg
+						Write-Buffer -Text $textParts[$j+1] -FG $hotkeyFg -BG $bg
+						Write-Buffer -Text ")" -FG $fg -BG $bg
+						$j += 2
+					} elseif ($part -ne "") {
+						Write-Buffer -Text $part -FG $fg -BG $bg
+					}
+				}
+			}
+			Flush-Buffer
 		}
 
 		# Function to draw drop shadow for dialog boxes
@@ -2221,14 +2587,62 @@ namespace mJiggAPI {
 		)
 		$script:CurrentResizeQuote = $null
 		
-		# Helper function: Draw centered logo during window resize using buffered output
-		function Draw-ResizeLogo {
-			param([switch]$ClearFirst)
+	# Restores ENABLE_MOUSE_INPUT on the console's stdin handle.
+	# [Console]::Clear() can cause Windows Terminal to reset the console input mode,
+	# stripping ENABLE_MOUSE_INPUT and silently dropping all subsequent mouse events.
+	# Call this after every [Console]::Clear() that occurs outside of normal rendering.
+	function Restore-ConsoleInputMode {
+		try {
+			$hConsole = [mJiggAPI.Mouse]::GetStdHandle(-10)  # STD_INPUT_HANDLE
+			$mode = [uint32]0
+			if ([mJiggAPI.Mouse]::GetConsoleMode($hConsole, [ref]$mode)) {
+				$ENABLE_QUICK_EDIT_MODE = 0x0040
+				$ENABLE_MOUSE_INPUT     = 0x0010
+				$newMode = ($mode -band (-bnot $ENABLE_QUICK_EDIT_MODE)) -bor $ENABLE_MOUSE_INPUT
+				[mJiggAPI.Mouse]::SetConsoleMode($hConsole, $newMode) | Out-Null
+			}
+		} catch { }
+	}
+
+	# After a drag-resize Windows Terminal briefly holds mouse-event routing for its own
+	# resize UI and doesn't forward mouse clicks to the console app. Injecting a system-level
+	# keyboard event (via keybd_event, not WriteConsoleInput) signals to Windows Terminal that
+	# focus is back in the console app, restoring normal mouse-event delivery.
+	# VK_RMENU (Right Alt, 0xA5) is a pure modifier key - no printable character, no hotkey risk.
+	function Send-ResizeExitWakeKey {
+		try {
+			$vkCode = [byte]0xA5  # VK_RMENU (Right Alt)
+			[mJiggAPI.Keyboard]::keybd_event($vkCode, [byte]0, [uint32]0, [int]0)        # key down
+			Start-Sleep -Milliseconds 10
+			[mJiggAPI.Keyboard]::keybd_event($vkCode, [byte]0, [uint32]0x0002, [int]0)   # key up
+		} catch { }
+	}
+
+	# Helper function: Draw centered logo during window resize using buffered output
+	function Draw-ResizeLogo {
+			param(
+				[switch]$ClearFirst,
+				[object]$WindowSize = $null
+			)
 			try {
 				$rawUI = $Host.UI.RawUI
-				$winSize = $rawUI.WindowSize
+				$winSize = if ($null -ne $WindowSize) { $WindowSize } else { $rawUI.WindowSize }
 				$winWidth = $winSize.Width
 				$winHeight = $winSize.Height
+
+			# Lock height during resize: WindowSize.Height can transiently fluctuate by ±1 row
+			# when only the width is being changed (Windows Terminal reflow). Lock the height
+			# at resize-start and only update it if it changes by more than 1 row, so small
+			# transient fluctuations never affect the vertical center calculation.
+			if ($null -ne $WindowSize) {
+				if ($null -eq $script:ResizeLogoLockedHeight) {
+					$script:ResizeLogoLockedHeight = $winHeight
+				} elseif ([math]::Abs($winHeight - $script:ResizeLogoLockedHeight) -gt 1) {
+					$script:ResizeLogoLockedHeight = $winHeight
+				}
+				# else: change is ≤1 row — treat as transient, hold the locked value
+				$winHeight = $script:ResizeLogoLockedHeight
+			}
 				
 				# Only draw if window is large enough
 				if ($winWidth -lt 16 -or $winHeight -lt 14) {
@@ -3593,10 +4007,15 @@ namespace mJiggAPI {
 			}
 		}
 
-		# Initialization complete - pause to read debug output if in debug mode
-		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 4: Before debug mode check (DebugMode=$DebugMode)" | Out-File $script:StartupDiagFile -Append }
-		
-		if ($DebugMode) {
+	# Show startup complete screen (non-debug, non-hidden modes only)
+	if (-not $DebugMode -and $Output -ne "hidden") {
+		Show-StartupComplete -HasParams ($PSBoundParameters.Count -gt 0)
+	}
+
+	# Pause to read debug output if in debug mode
+	if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 4: Before debug mode check (DebugMode=$DebugMode)" | Out-File $script:StartupDiagFile -Append }
+	
+	if ($DebugMode) {
 			if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - ENTERED DEBUG MODE KEY WAIT LOOP" | Out-File $script:StartupDiagFile -Append }
 
 			Write-Host "`nPress any key to start mJig..." -ForegroundColor $script:TextWarning
@@ -3650,8 +4069,14 @@ namespace mJiggAPI {
 		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 5: Skipping key buffer clear (causes blocking)" | Out-File $script:StartupDiagFile -Append }
 		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 6: Entering main loop" | Out-File $script:StartupDiagFile -Append }
 
-		# Main Processing Loop
-		:process while ($true) {
+	# Sync window/buffer tracking to the current state before the main loop.
+	# Without this, the first iteration sees $oldWindowSize = $null → windowSizeChanged = $true
+	# and immediately enters the resize handler even though nothing has changed.
+	$oldWindowSize = (Get-Host).UI.RawUI.WindowSize
+	$OldBufferSize = (Get-Host).UI.RawUI.BufferSize
+
+	# Main Processing Loop
+	:process while ($true) {
 			$script:LoopIteration++
 			
 			# Reset state for this iteration
@@ -3772,14 +4197,64 @@ namespace mJiggAPI {
 										if ($mouseFlags -eq 0x0004) {
 											$hasScrollEvent = $true
 											$lastScrollIdx = $e
-										} elseif ($mouseFlags -eq 0 -and ($mouseButtons -band 0x0001) -ne 0) {
-											# Left button press (dwEventFlags=0 means button press/release, bit 0 = left button)
-											$script:ConsoleClickCoords = @{
-												X = $peekBuffer[$e].MouseEvent.dwMousePosition.X
-												Y = $peekBuffer[$e].MouseEvent.dwMousePosition.Y
+									} elseif ($mouseFlags -eq 0) {
+										# Button press/release event (dwEventFlags=0); bit 0 of dwButtonState = left button currently held
+										$lmbNow = ($mouseButtons -band 0x0001) -ne 0
+										if ($lmbNow -and -not $script:LButtonWasDown) {
+											# LMB DOWN: find button under cursor and immediately render it in onclick colors
+											$dX = $peekBuffer[$e].MouseEvent.dwMousePosition.X
+											$dY = $peekBuffer[$e].MouseEvent.dwMousePosition.Y
+											$script:PressedMenuButton = $null
+											if ($null -eq $script:DialogButtonBounds -and $null -ne $script:MenuItemsBounds) {
+												foreach ($btn in $script:MenuItemsBounds) {
+													if ($null -ne $btn.hotkey -and $dY -eq $btn.y -and $dX -ge $btn.startX -and $dX -le $btn.endX) {
+														$script:PressedMenuButton = $btn.hotkey
+														$ocFg = if ($null -ne $btn.onClickFg)       { $btn.onClickFg }       else { $script:MenuButtonOnClickFg }
+														$ocBg = if ($null -ne $btn.onClickBg)       { $btn.onClickBg }       else { $script:MenuButtonOnClickBg }
+														$ocHk = if ($null -ne $btn.onClickHotkeyFg) { $btn.onClickHotkeyFg } else { $script:MenuButtonOnClickHotkey }
+														Write-ButtonImmediate -btn $btn -fg $ocFg -bg $ocBg -hotkeyFg $ocHk
+														break
+													}
+												}
+											}
+											$lastClickIdx = $e
+										} elseif (-not $lmbNow -and $script:LButtonWasDown) {
+											# LMB UP: decide whether to trigger action and how to restore button colors
+											$uX = $peekBuffer[$e].MouseEvent.dwMousePosition.X
+											$uY = $peekBuffer[$e].MouseEvent.dwMousePosition.Y
+											if ($null -ne $script:PressedMenuButton -and $null -ne $script:MenuItemsBounds) {
+												foreach ($btn in $script:MenuItemsBounds) {
+													if ($btn.hotkey -eq $script:PressedMenuButton) {
+														$releasedOver = ($uY -eq $btn.y -and $uX -ge $btn.startX -and $uX -le $btn.endX)
+													if ($releasedOver) {
+														# Confirmed click: trigger action, leave onclick colors active.
+														# PendingDialogCheck tells the render loop to clear the pressed state on the
+														# first render UNLESS a dialog is open at that point (popup persists).
+														$script:ConsoleClickCoords  = @{ X = $uX; Y = $uY }
+														$script:ButtonClickedAt     = Get-Date
+														$script:PendingDialogCheck  = $true
+														# Don't clear PressedMenuButton here — render loop handles restoration
+														} else {
+															# Cancelled (dragged off): wait 100ms then restore immediately
+															Start-Sleep -Milliseconds 100
+															$nFg = if ($null -ne $btn.fg)       { $btn.fg }       else { $script:MenuButtonText }
+															$nBg = if ($null -ne $btn.bg)       { $btn.bg }       else { $script:MenuButtonBg }
+															$nHk = if ($null -ne $btn.hotkeyFg) { $btn.hotkeyFg } else { $script:MenuButtonHotkey }
+															Write-ButtonImmediate -btn $btn -fg $nFg -bg $nBg -hotkeyFg $nHk
+															$script:PressedMenuButton = $null
+															$script:ButtonClickedAt   = $null
+														}
+														break
+													}
+												}
+											} elseif ($null -ne $script:DialogButtonBounds) {
+												# Dialog buttons: trigger on UP
+												$script:ConsoleClickCoords = @{ X = $uX; Y = $uY }
 											}
 											$lastClickIdx = $e
 										}
+										$script:LButtonWasDown = $lmbNow
+									}
 									}
 									if ($peekBuffer[$e].EventType -eq 0x0001 -and $peekBuffer[$e].KeyEvent.wVirtualKeyCode -ne 0xA5) {
 										$hasKeyboardEvent = $true
@@ -4460,129 +4935,59 @@ namespace mJiggAPI {
 							break
 						}
 						
+
 						# Check if window size is different from what we last processed (oldWindowSize)
 						# Skip this check if we just handled a text zoom
-						$windowSizeChanged = ($null -eq $oldWindowSize -or 
-							$newWindowSize.Width -ne $oldWindowSize.Width -or 
+						$windowSizeChanged = ($null -eq $oldWindowSize -or
+							$newWindowSize.Width -ne $oldWindowSize.Width -or
 							$newWindowSize.Height -ne $oldWindowSize.Height)
-						
+
 						if ($windowSizeChanged) {
-							# Check if this is a new size (different from pending resize) or if we don't have a pending resize
-							$isNewSize = ($null -eq $PendingResize -or 
-								$newWindowSize.Width -ne $PendingResize.Width -or 
-								$newWindowSize.Height -ne $PendingResize.Height)
-							
-							if ($isNewSize) {
-								# Clear screen once when resize starts
-								if (-not $ResizeClearedScreen) {
-									$ResizeClearedScreen = $true
-									$script:CurrentResizeQuote = $null
-									Draw-ResizeLogo -ClearFirst
-									$LastResizeLogoTime = Get-Date
-								}
-								# New size detected - store it and reset timer
-								$PendingResize = $newWindowSize
-								$lastResizeDetection = Get-Date
-							}
-						}
-						
-						# Tight redraw loop while resizing - bypasses the normal 50ms sleep
-						while ($ResizeClearedScreen) {
-							# Check for size changes
-							$newWindowSize = $pswindow.WindowSize
-							$isNewSize = ($null -eq $PendingResize -or 
-								$newWindowSize.Width -ne $PendingResize.Width -or 
-								$newWindowSize.Height -ne $PendingResize.Height)
-							
-							if ($isNewSize) {
-								$PendingResize = $newWindowSize
-								$lastResizeDetection = Get-Date
-								Draw-ResizeLogo -ClearFirst
-								$LastResizeLogoTime = Get-Date
-							}
-							
-							# Check if resize is complete (stable for threshold)
-							$sizeMatchesPending = ($newWindowSize.Width -eq $PendingResize.Width -and 
-								$newWindowSize.Height -eq $PendingResize.Height)
-							if ($sizeMatchesPending) {
-								$timeSinceResize = Get-TimeSinceMs -startTime $lastResizeDetection
-								if ($timeSinceResize -ge $ResizeThrottleMs) {
-									# Resize complete - exit tight loop
-									$currentWindowSize = $pswindow.WindowSize
-									$currentBufferSize = $pswindow.BufferSize
-									try {
-										$pswindow.BufferSize = New-Object System.Management.Automation.Host.Size($currentBufferSize.Width, $currentWindowSize.Height)
-										$currentBufferSize = $pswindow.BufferSize
-									} catch { }
-									$OldBufferSize = $currentBufferSize
-									$oldWindowSize = $currentWindowSize
-									$HostWidth = $currentWindowSize.Width
-									$HostHeight = $currentWindowSize.Height
-									$SkipUpdate = $true
-									$forceRedraw = $true
-									$waitExecuted = $false
-									$PendingResize = $null
-									$lastResizeDetection = $null
-									$ResizeClearedScreen = $false
-									$LastResizeLogoTime = $null
-									break
-								}
-							}
-							
-							# Small sleep to prevent CPU spinning (1ms)
-							Start-Sleep -Milliseconds 1
-						}
-						
-						# If resize completed, break out of wait loop
-						if ($forceRedraw) {
-							break
-						}
-						
-						# Check if window has been stable (matches pending resize) long enough to process
-						if ($null -ne $PendingResize -and $null -ne $lastResizeDetection) {
-							# Verify current size still matches pending resize (window stopped changing)
-							$sizeMatchesPending = ($newWindowSize.Width -eq $PendingResize.Width -and 
-								$newWindowSize.Height -eq $PendingResize.Height)
-							
-							if ($sizeMatchesPending) {
-								$timeSinceResize = Get-TimeSinceMs -startTime $lastResizeDetection
-								if ($timeSinceResize -ge $ResizeThrottleMs) {
-									# Window has been stable long enough - process the resize
-									$currentWindowSize = $pswindow.WindowSize
-									$currentBufferSize = $pswindow.BufferSize
-									# Set vertical buffer to match window height, preserve horizontal buffer width
-									try {
-										$pswindow.BufferSize = New-Object System.Management.Automation.Host.Size($currentBufferSize.Width, $currentWindowSize.Height)
-										$currentBufferSize = $pswindow.BufferSize
-									} catch {
-										# If setting buffer size fails, continue with current buffer size
-									}
-									# Update tracking variables
-									$OldBufferSize = $currentBufferSize
-									$oldWindowSize = $currentWindowSize
-									$HostWidth = $currentWindowSize.Width
-									$HostHeight = $currentWindowSize.Height
-									$SkipUpdate = $true
-									$forceRedraw = $true
-									$waitExecuted = $false  # Mark that wait was interrupted, don't log this
-									$PendingResize = $null  # Clear pending resize
-									$lastResizeDetection = $null  # Clear detection time
-									$ResizeClearedScreen = $false  # Reset for next resize
-									$LastResizeLogoTime = $null  # Clear logo timer
-									# Break out of wait loop to immediately redraw
-									break
-								}
-							}
-						}
-					}
-					
-					start-sleep -m 50
-					
-					# Check if we've waited long enough
-					if ($x -ge $math) {
+							# Unified handler — blocks until stable and LMB released, draws logo or blank
+							$stableSize = Invoke-ResizeHandler
+							$currentBufferSize = $pswindow.BufferSize
+							try {
+								$pswindow.BufferSize = New-Object System.Management.Automation.Host.Size($currentBufferSize.Width, $stableSize.Height)
+							} catch {}
+							$OldBufferSize       = $pswindow.BufferSize
+							$oldWindowSize       = $stableSize
+							$HostWidth           = $stableSize.Width
+							$HostHeight          = $stableSize.Height
+							$PendingResize       = $null
+							$lastResizeDetection = $null
+							$ResizeClearedScreen = $false
+							$LastResizeLogoTime  = $null
+							$SkipUpdate          = $true
+							$forceRedraw         = $true
+							$waitExecuted        = $false
 						break
 					}
-				} # end :waitLoop
+				}
+
+				# Hidden mode: unified resize handler (draws blank screen, waits for stability + LMB release)
+				if ($Output -eq "hidden" -and ($x % 4 -eq 0)) {
+					$hwSize = (Get-Host).UI.RawUI.WindowSize
+					if ($null -ne $OldWindowSize -and ($hwSize.Width -ne $OldWindowSize.Width -or $hwSize.Height -ne $OldWindowSize.Height)) {
+						$stableSize          = Invoke-ResizeHandler
+						$oldWindowSize       = $stableSize
+						$HostWidth           = $stableSize.Width
+						$HostHeight          = $stableSize.Height
+						$PendingResize       = $null
+						$lastResizeDetection = $null
+						$ResizeClearedScreen = $false
+						$forceRedraw         = $true
+						$waitExecuted        = $false
+						break
+					}
+				}
+				
+				start-sleep -m 50
+				
+				# Check if we've waited long enough
+				if ($x -ge $math) {
+					break
+				}
+			} # end :waitLoop
 			}
 			
 			# Keyboard and mouse input checking is now done every 200ms in the wait loop above
@@ -4619,122 +5024,52 @@ namespace mJiggAPI {
 				# GetLastInputInfo not available, skip
 			}
 			
-			# Check for window size changes (also check outside wait loop)
-			# Only check if we haven't already detected a resize in this iteration
-			if ($Output -ne "hidden" -and -not $forceRedraw) {
-				$pshost = Get-Host
-				$pswindow = $pshost.UI.RawUI
-				$newWindowSize = $pswindow.WindowSize
-				$newBufferSize = $pswindow.BufferSize
-				
-				# Check if buffer size changed (e.g., from text zoom)
-				# When text is zoomed, horizontal buffer size changes - this determines line length
-				$bufferSizeChanged = ($null -eq $OldBufferSize -or 
-					$newBufferSize.Width -ne $OldBufferSize.Width -or 
-					$newBufferSize.Height -ne $OldBufferSize.Height)
-				
-				# Check if horizontal buffer changed but window width didn't (text zoom)
-				# Also ensure vertical buffer matches window height
-				$horizontalBufferChanged = ($null -ne $OldBufferSize -and $newBufferSize.Width -ne $OldBufferSize.Width)
-				$windowWidthUnchanged = ($null -ne $oldWindowSize -and $newWindowSize.Width -eq $oldWindowSize.Width)
-				
-				# Set vertical buffer to match window height
-				if ($newBufferSize.Height -ne $newWindowSize.Height) {
-					try {
-						$pswindow.BufferSize = New-Object System.Management.Automation.Host.Size($newBufferSize.Width, $newWindowSize.Height)
-						$newBufferSize = $pswindow.BufferSize
-					} catch {
-						# If setting buffer size fails, continue with current buffer size
-					}
-				}
-				
-				# If horizontal buffer changed but window width didn't, it's text zoom - use buffer width for line length
-				$isTextZoom = $false
-				if ($horizontalBufferChanged -and $windowWidthUnchanged -and $null -ne $OldBufferSize) {
-					# Text zoom detected - use buffer width for line length calculations
-					$isTextZoom = $true
-				}
-				
-				if ($isTextZoom) {
-					# Text zoom detected - use buffer width for line length calculations
-					$OldBufferSize = $newBufferSize
-					# Use buffer width for hostWidth (determines line length), window height for hostHeight
-					$HostWidth = $newBufferSize.Width
-					$HostHeight = $newWindowSize.Height
-					# Don't update oldWindowSize - keep the original so resize handler doesn't trigger
-					$SkipUpdate = $true
-					$forceRedraw = $true
-					clear-host
-					# Skip window resize check since this is just a zoom
-					$windowSizeChanged = $false
-				} else {
-					# Check if window size is different from what we last processed (oldWindowSize)
-					$windowSizeChanged = ($null -eq $oldWindowSize -or 
-						$newWindowSize.Width -ne $oldWindowSize.Width -or 
-						$newWindowSize.Height -ne $oldWindowSize.Height)
-				}
-				
-				if ($windowSizeChanged) {
-					# Check if this is a new size (different from pending resize) or if we don't have a pending resize
-					$isNewSize = ($null -eq $PendingResize -or 
-						$newWindowSize.Width -ne $PendingResize.Width -or 
-						$newWindowSize.Height -ne $PendingResize.Height)
-					
-					if ($isNewSize) {
-						if (-not $ResizeClearedScreen) {
-							$ResizeClearedScreen = $true
-							$script:CurrentResizeQuote = $null
-							Draw-ResizeLogo -ClearFirst
-							$LastResizeLogoTime = Get-Date
-						}
-						$PendingResize = $newWindowSize
-						$lastResizeDetection = Get-Date
-					}
-				}
-				
-				# Redraw logo every 100ms while resizing
-				if ($ResizeClearedScreen -and $null -ne $LastResizeLogoTime) {
-					$timeSinceLogoDraw = Get-TimeSinceMs -startTime $LastResizeLogoTime
-					if ($timeSinceLogoDraw -ge 3) {
-						Draw-ResizeLogo -ClearFirst
-						$LastResizeLogoTime = Get-Date
-					}
-				}
-				
-				# Check if window has been stable (matches pending resize) long enough to process
-				if ($null -ne $PendingResize -and $null -ne $lastResizeDetection) {
-					# Verify current size still matches pending resize (window stopped changing)
-					$sizeMatchesPending = ($newWindowSize.Width -eq $PendingResize.Width -and 
-						$newWindowSize.Height -eq $PendingResize.Height)
-					
-					if ($sizeMatchesPending) {
-						$timeSinceResize = Get-TimeSinceMs -startTime $lastResizeDetection
-						if ($timeSinceResize -ge $ResizeThrottleMs) {
-							# Window has been stable long enough - process the resize
-							$currentWindowSize = $pswindow.WindowSize
-							$currentBufferSize = $pswindow.BufferSize
-							# Set vertical buffer to match window height, preserve horizontal buffer width
-							try {
-								$pswindow.BufferSize = New-Object System.Management.Automation.Host.Size($currentBufferSize.Width, $currentWindowSize.Height)
-								$currentBufferSize = $pswindow.BufferSize
-							} catch {
-								# If setting buffer size fails, continue with current buffer size
-							}
-							# Update tracking variables
-							$OldBufferSize = $currentBufferSize
-							$oldWindowSize = $currentWindowSize
-							$HostWidth = $currentWindowSize.Width
-							$HostHeight = $currentWindowSize.Height
-							$SkipUpdate = $true
-							$forceRedraw = $true
-							$PendingResize = $null  # Clear pending resize
-							$lastResizeDetection = $null  # Clear detection time
-							$ResizeClearedScreen = $false  # Reset for next resize
-							$LastResizeLogoTime = $null  # Clear logo timer
-						}
-					}
-				}
+			# Check for window size changes outside the wait loop (catches resizes that happen during rendering)
+		if (-not $forceRedraw) {
+			$pshost     = Get-Host
+			$pswindow   = $pshost.UI.RawUI
+			$newWindowSize = $pswindow.WindowSize
+			$newBufferSize = $pswindow.BufferSize
+
+			# Ensure vertical buffer matches window height
+			if ($newBufferSize.Height -ne $newWindowSize.Height) {
+				try {
+					$pswindow.BufferSize = New-Object System.Management.Automation.Host.Size($newBufferSize.Width, $newWindowSize.Height)
+					$newBufferSize = $pswindow.BufferSize
+				} catch {}
 			}
+
+			# Detect text zoom: horizontal buffer changed but window width did not
+			$horizontalBufferChanged = ($null -ne $OldBufferSize -and $newBufferSize.Width -ne $OldBufferSize.Width)
+			$windowWidthUnchanged    = ($null -ne $oldWindowSize -and $newWindowSize.Width -eq $oldWindowSize.Width)
+
+			if ($horizontalBufferChanged -and $windowWidthUnchanged -and $null -ne $OldBufferSize) {
+				$OldBufferSize = $newBufferSize
+				$HostWidth     = $newBufferSize.Width
+				$HostHeight    = $newWindowSize.Height
+				$SkipUpdate    = $true
+				$forceRedraw   = $true
+				clear-host
+			} elseif ($null -ne $oldWindowSize -and
+					($newWindowSize.Width -ne $oldWindowSize.Width -or $newWindowSize.Height -ne $oldWindowSize.Height)) {
+				# Unified handler — blocks until stable and LMB released
+				$stableSize          = Invoke-ResizeHandler
+				$currentBufferSize   = $pswindow.BufferSize
+				try {
+					$pswindow.BufferSize = New-Object System.Management.Automation.Host.Size($currentBufferSize.Width, $stableSize.Height)
+				} catch {}
+				$OldBufferSize       = $pswindow.BufferSize
+				$oldWindowSize       = $stableSize
+				$HostWidth           = $stableSize.Width
+				$HostHeight          = $stableSize.Height
+				$PendingResize       = $null
+				$lastResizeDetection = $null
+				$ResizeClearedScreen = $false
+				$LastResizeLogoTime  = $null
+				$SkipUpdate          = $true
+				$forceRedraw         = $true
+			}
+		}
 			
 			# Check if this is the first run (before we modify lastMovementTime)
 			$isFirstRun = ($null -eq $LastMovementTime)
@@ -5002,18 +5337,30 @@ namespace mJiggAPI {
 					$distance = 1
 				}
 				
-				# Calculate random direction (angle in radians)
-				$angle = Get-Random -Minimum 0 -Maximum ([Math]::PI * 2)
-				
-				# Calculate target coordinates based on distance and angle
-				$x = [Math]::Round($pos.X + ($distance * [Math]::Cos($angle)))
-				$y = [Math]::Round($pos.Y + ($distance * [Math]::Sin($angle)))
-				
-				# Ensure coordinates stay within screen bounds
-				$screenWidth = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
-				$screenHeight = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height
-				$x = [Math]::Max(0, [Math]::Min($x, $screenWidth - 1))
-				$y = [Math]::Max(0, [Math]::Min($y, $screenHeight - 1))
+			# Calculate random direction (angle in radians)
+			$angle = Get-Random -Minimum 0 -Maximum ([Math]::PI * 2)
+			
+			# Calculate target coordinates based on distance and angle
+			$x = [Math]::Round($pos.X + ($distance * [Math]::Cos($angle)))
+			$y = [Math]::Round($pos.Y + ($distance * [Math]::Sin($angle)))
+			
+			# Use the virtual screen rectangle so all connected monitors are reachable.
+			# VirtualScreen is the bounding rect of every monitor combined.
+			$vScreen  = [System.Windows.Forms.SystemInformation]::VirtualScreen
+			$sLeft    = $vScreen.Left
+			$sTop     = $vScreen.Top
+			$sRight   = $vScreen.Right  - 1
+			$sBottom  = $vScreen.Bottom - 1
+			
+			# Reflect off boundaries instead of clamping so the cursor naturally bounces
+			# inward — no more rubbing along an edge across multiple consecutive moves.
+			if ($x -lt $sLeft)   { $x = $sLeft   + ($sLeft   - $x) }
+			if ($x -gt $sRight)  { $x = $sRight  - ($x - $sRight)  }
+			if ($y -lt $sTop)    { $y = $sTop    + ($sTop    - $y)  }
+			if ($y -gt $sBottom) { $y = $sBottom - ($y - $sBottom)  }
+			# Final clamp handles the rare double-bounce edge case
+			$x = [Math]::Max($sLeft, [Math]::Min($x, $sRight))
+			$y = [Math]::Max($sTop,  [Math]::Min($y, $sBottom))
 				
 				# Calculate movement direction for arrow emoji
 				try {
@@ -5030,25 +5377,25 @@ namespace mJiggAPI {
 				$movementPoints = $movementPath.Points
 				$LastMovementDurationMs = $movementPath.TotalTimeMs
 				
-				# Move through each point smoothly
-				$movementAborted = $false
-				if ($movementPoints.Count -gt 1) {
-					$timePerPoint = $LastMovementDurationMs / ($movementPoints.Count - 1)
+			# Move through each point smoothly
+			$movementAborted = $false
+			if ($movementPoints.Count -gt 1) {
+				# Constant 5ms between every cursor step. Point count was sized to match this
+				# in Get-SmoothMovementPath, so total wall-time ≈ TotalTimeMs as requested.
+				$stepIntervalMs = 5
+				
+				# Add a tiny initial delay to prevent stutter at movement start
+				# This ensures smooth transition from wait loop to movement
+				Start-Sleep -Milliseconds 1
+				
+				# Move to each point at a constant 5ms interval (skip first point = start position)
+				for ($i = 1; $i -lt $movementPoints.Count; $i++) {
+					$point = $movementPoints[$i]
+					[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point ($point.X, $point.Y)
 					
-					# Add a tiny initial delay to prevent stutter at movement start
-					# This ensures smooth transition from wait loop to movement
-					Start-Sleep -Milliseconds 1
-					
-					# Move to each intermediate point (skip first point as it's the start position)
-					for ($i = 1; $i -lt $movementPoints.Count; $i++) {
-						$point = $movementPoints[$i]
-						[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point ($point.X, $point.Y)
-						
-						# Sleep for the calculated time per point (minimum 1ms)
-						# Always sleep between points to ensure smooth movement
-						if ($i -lt $movementPoints.Count - 1) {
-							$sleepTime = [Math]::Max(1, [Math]::Round($timePerPoint))
-							Start-Sleep -Milliseconds $sleepTime
+					# Sleep 5ms between steps; skip after the last point to avoid an extra delay
+					if ($i -lt $movementPoints.Count - 1) {
+						Start-Sleep -Milliseconds $stepIntervalMs
 							
 							# Check if user moved the mouse during animation by comparing
 							# actual cursor position to where we just placed it
@@ -5393,10 +5740,10 @@ namespace mJiggAPI {
 				Write-Buffer -X ($curX + 2) -Y $Outputline -Text ")" -FG $script:HeaderAppName
 				$curX = $curX + 2 + 1  # emoji (2) + ")" (1)
 				# Add DEBUGMODE indicator if in debug mode
-				if ($DebugMode) {
-					Write-Buffer -Text " - DEBUGMODE" -FG $script:TextError
-					$curX += 13
-				}
+			if ($DebugMode) {
+				Write-Buffer -Text " - DEBUGMODE" -FG $script:TextError
+				$curX += 12
+			}
 				
 				# Add spacing before times
 				Write-Buffer -Text (" " * $spacingBeforeTimes)
@@ -5787,9 +6134,23 @@ namespace mJiggAPI {
 					$quitWidth = $quitItem.short.Length
 				}
 				
-				# Write menu items via buffer with static position tracking
-				$menuY = $Outputline
-				$currentMenuX = 2  # Start after "  " prefix
+			# Restore pressed-button highlight when appropriate:
+			# - Immediate actions (toggle, hide): clear on the very first render after the click (no dialog opened)
+			# - Popup actions (dialogs): the dialog is blocking so this render only runs after it closes — clear then too
+			# - While a dialog IS open: skip this block so the button stays highlighted throughout the dialog
+			if ($script:PendingDialogCheck -and $null -ne $script:PressedMenuButton) {
+				if ($null -eq $script:DialogButtonBounds) {
+					# No dialog is open: either the action was immediate or the dialog just closed — clear now
+					$script:PressedMenuButton  = $null
+					$script:ButtonClickedAt    = $null
+					$script:PendingDialogCheck = $false
+				}
+				# If DialogButtonBounds is non-null a dialog is open; leave everything in place until it closes
+			}
+
+			# Write menu items via buffer with static position tracking
+			$menuY = $Outputline
+			$currentMenuX = 2  # Start after "  " prefix
 				Write-Buffer -X 0 -Y $menuY -Text "  "
 				
 				$script:MenuItemsBounds = @()
@@ -5817,55 +6178,70 @@ namespace mJiggAPI {
 						$itemDisplayWidth = $itemText.Length
 					}
 					
-					# Render the menu item
-					if ($menuFormat -eq 0) {
-						$parts = $itemText -split "\|", 2
-						if ($parts.Count -eq 2) {
-							$emoji = $parts[0]
-							$text = $parts[1]
-							Write-Buffer -X $itemStartX -Y $menuY -Text $emoji -BG $script:MenuButtonBg -Wide
-						$pipeX = $itemStartX + 2
-						Write-Buffer -X $pipeX -Y $menuY -Text "|" -FG $script:MenuButtonPipe -BG $script:MenuButtonBg
-						$textParts = $text -split "([()])"
-							for ($j = 0; $j -lt $textParts.Count; $j++) {
-								$part = $textParts[$j]
-								if ($part -eq "(" -and $j + 2 -lt $textParts.Count -and $textParts[$j + 1] -match "^[a-z]$" -and $textParts[$j + 2] -eq ")") {
-									Write-Buffer -Text "(" -FG $script:MenuButtonText -BG $script:MenuButtonBg
-									Write-Buffer -Text $textParts[$j + 1] -FG $script:MenuButtonHotkey -BG $script:MenuButtonBg
-									Write-Buffer -Text ")" -FG $script:MenuButtonText -BG $script:MenuButtonBg
-									$j += 2
-								} elseif ($part -ne "") {
-									Write-Buffer -Text $part -FG $script:MenuButtonText -BG $script:MenuButtonBg
-								}
-							}
-						}
-					} else {
-						Write-Buffer -X $itemStartX -Y $menuY -Text "" -BG $script:MenuButtonBg
-						$textParts = $itemText -split "([()])"
+				# Resolve hotkey and pressed-state colors before rendering
+				$hotkeyMatch = $itemText -match "\(([a-z])\)"
+				$hotkey = if ($hotkeyMatch) { $matches[1] } else { $null }
+				$isPressed = ($null -ne $script:PressedMenuButton -and $script:PressedMenuButton -eq $hotkey)
+				$btnFg     = if ($isPressed) { $script:MenuButtonOnClickFg }     else { $script:MenuButtonText }
+				$btnBg     = if ($isPressed) { $script:MenuButtonOnClickBg }     else { $script:MenuButtonBg }
+				$btnHkFg   = if ($isPressed) { $script:MenuButtonOnClickHotkey } else { $script:MenuButtonHotkey }
+				$btnPipeFg = if ($isPressed) { $script:MenuButtonOnClickFg }     else { $script:MenuButtonPipe }
+
+				# Render the menu item
+				if ($menuFormat -eq 0) {
+					$parts = $itemText -split "\|", 2
+					if ($parts.Count -eq 2) {
+						$emoji = $parts[0]
+						$text = $parts[1]
+						Write-Buffer -X $itemStartX -Y $menuY -Text $emoji -BG $btnBg -Wide
+					$pipeX = $itemStartX + 2
+					Write-Buffer -X $pipeX -Y $menuY -Text "|" -FG $btnPipeFg -BG $btnBg
+					$textParts = $text -split "([()])"
 						for ($j = 0; $j -lt $textParts.Count; $j++) {
 							$part = $textParts[$j]
 							if ($part -eq "(" -and $j + 2 -lt $textParts.Count -and $textParts[$j + 1] -match "^[a-z]$" -and $textParts[$j + 2] -eq ")") {
-								Write-Buffer -Text "(" -FG $script:MenuButtonText -BG $script:MenuButtonBg
-								Write-Buffer -Text $textParts[$j + 1] -FG $script:MenuButtonHotkey -BG $script:MenuButtonBg
-								Write-Buffer -Text ")" -FG $script:MenuButtonText -BG $script:MenuButtonBg
+								Write-Buffer -Text "(" -FG $btnFg -BG $btnBg
+								Write-Buffer -Text $textParts[$j + 1] -FG $btnHkFg -BG $btnBg
+								Write-Buffer -Text ")" -FG $btnFg -BG $btnBg
 								$j += 2
 							} elseif ($part -ne "") {
-								Write-Buffer -Text $part -FG $script:MenuButtonText -BG $script:MenuButtonBg
+								Write-Buffer -Text $part -FG $btnFg -BG $btnBg
 							}
 						}
 					}
-					
-					# Store menu item bounds (computed statically)
-					$itemEndX = $itemStartX + $itemDisplayWidth - 1
-					$hotkeyMatch = $itemText -match "\(([a-z])\)"
-					$hotkey = if ($hotkeyMatch) { $matches[1] } else { $null }
-					$script:MenuItemsBounds += @{
-						startX = $itemStartX
-						endX = $itemEndX
-						y = $menuY
-						hotkey = $hotkey
-						index = $mi
+				} else {
+					Write-Buffer -X $itemStartX -Y $menuY -Text "" -BG $btnBg
+					$textParts = $itemText -split "([()])"
+					for ($j = 0; $j -lt $textParts.Count; $j++) {
+						$part = $textParts[$j]
+						if ($part -eq "(" -and $j + 2 -lt $textParts.Count -and $textParts[$j + 1] -match "^[a-z]$" -and $textParts[$j + 2] -eq ")") {
+							Write-Buffer -Text "(" -FG $btnFg -BG $btnBg
+							Write-Buffer -Text $textParts[$j + 1] -FG $btnHkFg -BG $btnBg
+							Write-Buffer -Text ")" -FG $btnFg -BG $btnBg
+							$j += 2
+						} elseif ($part -ne "") {
+							Write-Buffer -Text $part -FG $btnFg -BG $btnBg
+						}
 					}
+				}
+				
+			# Store menu item bounds (computed statically)
+			$itemEndX = $itemStartX + $itemDisplayWidth - 1
+				$script:MenuItemsBounds += @{
+					startX      = $itemStartX
+					endX        = $itemEndX
+					y           = $menuY
+					hotkey      = $hotkey
+					index       = $mi
+					displayText = $itemText
+					format      = $menuFormat
+					fg          = $script:MenuButtonText
+					bg          = $script:MenuButtonBg
+					hotkeyFg    = $script:MenuButtonHotkey
+					onClickFg   = $script:MenuButtonOnClickFg
+					onClickBg   = $script:MenuButtonOnClickBg
+					onClickHotkeyFg = $script:MenuButtonOnClickHotkey
+				}
 					
 					# Advance position statically
 					$currentMenuX = $itemStartX + $itemDisplayWidth
@@ -5897,54 +6273,69 @@ namespace mJiggAPI {
 					$itemText = $quitItem.short
 				}
 				
-				if ($menuFormat -eq 0) {
-					$parts = $itemText -split "\|", 2
-					if ($parts.Count -eq 2) {
-						$emoji = $parts[0]
-						$text = $parts[1]
-						Write-Buffer -X $quitStartX -Y $menuY -Text $emoji -BG $script:MenuButtonBg -Wide
-					$pipeX = $quitStartX + 2
-						Write-Buffer -X $pipeX -Y $menuY -Text "|" -FG $script:MenuButtonPipe -BG $script:MenuButtonBg
-						$textParts = $text -split "([()])"
-						for ($j = 0; $j -lt $textParts.Count; $j++) {
-							$part = $textParts[$j]
-							if ($part -eq "(" -and $j + 2 -lt $textParts.Count -and $textParts[$j + 1] -match "^[a-z]$" -and $textParts[$j + 2] -eq ")") {
-								Write-Buffer -Text "(" -FG $script:MenuButtonText -BG $script:MenuButtonBg
-								Write-Buffer -Text $textParts[$j + 1] -FG $script:MenuButtonHotkey -BG $script:MenuButtonBg
-								Write-Buffer -Text ")" -FG $script:MenuButtonText -BG $script:MenuButtonBg
-								$j += 2
-							} elseif ($part -ne "") {
-								Write-Buffer -Text $part -FG $script:MenuButtonText -BG $script:MenuButtonBg
-							}
-						}
-					}
-				} else {
-					Write-Buffer -X $quitStartX -Y $menuY -Text "" -BG $script:MenuButtonBg
-					$textParts = $itemText -split "([()])"
+			# Resolve hotkey and pressed-state colors for quit button
+			$quitHotkeyMatch = $itemText -match "\(([a-z])\)"
+			$quitHotkey = if ($quitHotkeyMatch) { $matches[1] } else { $null }
+			$qIsPressed  = ($null -ne $script:PressedMenuButton -and $script:PressedMenuButton -eq $quitHotkey)
+			$qBtnFg      = if ($qIsPressed) { $script:MenuButtonOnClickFg }     else { $script:MenuButtonText }
+			$qBtnBg      = if ($qIsPressed) { $script:MenuButtonOnClickBg }     else { $script:MenuButtonBg }
+			$qBtnHkFg    = if ($qIsPressed) { $script:MenuButtonOnClickHotkey } else { $script:MenuButtonHotkey }
+			$qBtnPipeFg  = if ($qIsPressed) { $script:MenuButtonOnClickFg }     else { $script:MenuButtonPipe }
+
+			if ($menuFormat -eq 0) {
+				$parts = $itemText -split "\|", 2
+				if ($parts.Count -eq 2) {
+					$emoji = $parts[0]
+					$text = $parts[1]
+					Write-Buffer -X $quitStartX -Y $menuY -Text $emoji -BG $qBtnBg -Wide
+				$pipeX = $quitStartX + 2
+					Write-Buffer -X $pipeX -Y $menuY -Text "|" -FG $qBtnPipeFg -BG $qBtnBg
+					$textParts = $text -split "([()])"
 					for ($j = 0; $j -lt $textParts.Count; $j++) {
 						$part = $textParts[$j]
 						if ($part -eq "(" -and $j + 2 -lt $textParts.Count -and $textParts[$j + 1] -match "^[a-z]$" -and $textParts[$j + 2] -eq ")") {
-							Write-Buffer -Text "(" -FG $script:MenuButtonText -BG $script:MenuButtonBg
-							Write-Buffer -Text $textParts[$j + 1] -FG $script:MenuButtonHotkey -BG $script:MenuButtonBg
-							Write-Buffer -Text ")" -FG $script:MenuButtonText -BG $script:MenuButtonBg
+							Write-Buffer -Text "(" -FG $qBtnFg -BG $qBtnBg
+							Write-Buffer -Text $textParts[$j + 1] -FG $qBtnHkFg -BG $qBtnBg
+							Write-Buffer -Text ")" -FG $qBtnFg -BG $qBtnBg
 							$j += 2
 						} elseif ($part -ne "") {
-							Write-Buffer -Text $part -FG $script:MenuButtonText -BG $script:MenuButtonBg
+							Write-Buffer -Text $part -FG $qBtnFg -BG $qBtnBg
 						}
 					}
 				}
-				
-				# Store quit item bounds (computed statically)
-				$quitEndX = $quitStartX + $quitWidth - 1
-				$quitHotkeyMatch = $itemText -match "\(([a-z])\)"
-				$quitHotkey = if ($quitHotkeyMatch) { $matches[1] } else { $null }
-				$script:MenuItemsBounds += @{
-					startX = $quitStartX
-					endX = $quitEndX
-					y = $menuY
-					hotkey = $quitHotkey
-					index = $menuItems.Count - 1
+			} else {
+				Write-Buffer -X $quitStartX -Y $menuY -Text "" -BG $qBtnBg
+				$textParts = $itemText -split "([()])"
+				for ($j = 0; $j -lt $textParts.Count; $j++) {
+					$part = $textParts[$j]
+					if ($part -eq "(" -and $j + 2 -lt $textParts.Count -and $textParts[$j + 1] -match "^[a-z]$" -and $textParts[$j + 2] -eq ")") {
+						Write-Buffer -Text "(" -FG $qBtnFg -BG $qBtnBg
+						Write-Buffer -Text $textParts[$j + 1] -FG $qBtnHkFg -BG $qBtnBg
+						Write-Buffer -Text ")" -FG $qBtnFg -BG $qBtnBg
+						$j += 2
+					} elseif ($part -ne "") {
+						Write-Buffer -Text $part -FG $qBtnFg -BG $qBtnBg
+					}
 				}
+			}
+			
+		# Store quit item bounds (computed statically)
+		$quitEndX = $quitStartX + $quitWidth - 1
+		$script:MenuItemsBounds += @{
+			startX      = $quitStartX
+			endX        = $quitEndX
+			y           = $menuY
+			hotkey      = $quitHotkey
+			index       = $menuItems.Count - 1
+			displayText = $itemText
+			format      = $menuFormat
+			fg          = $script:MenuButtonText
+			bg          = $script:MenuButtonBg
+			hotkeyFg    = $script:MenuButtonHotkey
+			onClickFg   = $script:MenuButtonOnClickFg
+			onClickBg   = $script:MenuButtonOnClickBg
+			onClickHotkeyFg = $script:MenuButtonOnClickHotkey
+		}
 				
 				# Right margin and clear remaining
 				$menuEndX = $quitStartX + $quitWidth
@@ -5957,40 +6348,50 @@ namespace mJiggAPI {
 				
 				# Flush entire UI to console in one operation
 				Flush-Buffer
-			} elseif ($Output -eq "hidden") {
-				if (-not $skipConsoleUpdate) {
-					# Detect resize while in hidden mode
-					$pswindow = (Get-Host).UI.RawUI
-					$newW = $pswindow.WindowSize.Width
-					$newH = $pswindow.WindowSize.Height
-					if ($newW -ne $HostWidth -or $newH -ne $HostHeight) {
-						$HostWidth = $newW
-						$HostHeight = $newH
-						$forceRedraw = $true
-					}
-					
-					$timeStr = $date.ToString("HH:mm:ss")
-					$statusLine = "$timeStr | running..."
-					
-					Write-Buffer -X 0 -Y 0 -Text $statusLine.PadRight($HostWidth)
-					
-					$hBtnY = [math]::Max(1, $HostHeight - 2)
-					$hBtnX = [math]::Max(0, $HostWidth - 4)
-					Write-Buffer -X $hBtnX -Y $hBtnY -Text "(" -FG $script:MenuButtonText -BG $script:MenuButtonBg
-					Write-Buffer -Text "h" -FG $script:MenuButtonHotkey -BG $script:MenuButtonBg
-					Write-Buffer -Text ")" -FG $script:MenuButtonText -BG $script:MenuButtonBg
-					
-					if ($forceRedraw) { Flush-Buffer -ClearFirst } else { Flush-Buffer }
-					
-					$script:MenuItemsBounds = @(@{
-						startX = $hBtnX
-						endX = $hBtnX + 2
-						y = $hBtnY
-						hotkey = "h"
-						index = 0
-					})
-				}
+		} elseif ($Output -eq "hidden") {
+			if (-not $skipConsoleUpdate) {
+				# Use live window dimensions for layout so the (h) button is always correctly
+				# positioned even while a resize is in progress. The outer resize path (above)
+				# handles updating $HostWidth/$HostHeight and firing Send-ResizeExitWakeKey
+				# once the window has been stable for $ResizeThrottleMs.
+				$pswindow = (Get-Host).UI.RawUI
+				$newW = $pswindow.WindowSize.Width
+				$newH = $pswindow.WindowSize.Height
+				
+				$timeStr = $date.ToString("HH:mm:ss")
+				$statusLine = "$timeStr | running..."
+				
+				Write-Buffer -X 0 -Y 0 -Text $statusLine.PadRight($newW)
+				
+			$hBtnY = [math]::Max(1, $newH - 2)
+			$hBtnX = [math]::Max(0, $newW - 4)
+			$hIsPressed = ($script:PressedMenuButton -eq "h")
+			$hBtnFg   = if ($hIsPressed) { $script:MenuButtonOnClickFg }     else { $script:MenuButtonText }
+			$hBtnBg   = if ($hIsPressed) { $script:MenuButtonOnClickBg }     else { $script:MenuButtonBg }
+			$hBtnHkFg = if ($hIsPressed) { $script:MenuButtonOnClickHotkey } else { $script:MenuButtonHotkey }
+			Write-Buffer -X $hBtnX -Y $hBtnY -Text "(" -FG $hBtnFg -BG $hBtnBg
+			Write-Buffer -Text "h" -FG $hBtnHkFg -BG $hBtnBg
+			Write-Buffer -Text ")" -FG $hBtnFg -BG $hBtnBg
+				
+				if ($forceRedraw) { Flush-Buffer -ClearFirst } else { Flush-Buffer }
+				
+				$script:MenuItemsBounds = @(@{
+					startX      = $hBtnX
+					endX        = $hBtnX + 2
+					y           = $hBtnY
+					hotkey      = "h"
+					index       = 0
+					displayText = "(h)"
+					format      = 1
+					fg          = $script:MenuButtonText
+					bg          = $script:MenuButtonBg
+					hotkeyFg    = $script:MenuButtonHotkey
+					onClickFg   = $script:MenuButtonOnClickFg
+					onClickBg   = $script:MenuButtonOnClickBg
+					onClickHotkeyFg = $script:MenuButtonOnClickHotkey
+				})
 			}
+		}
 			# If skipConsoleUpdate is true and Output is not "hidden", don't render anything (prevents stutter)
 			
 			# Reset resize cleared screen flag after we've completed a redraw

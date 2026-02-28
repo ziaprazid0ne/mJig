@@ -3,3 +3,4 @@ Layer 2: Remove the key name resolve_diag
 _parsecheck.ps1
 _diag/
 /.backups/
+resources/*.ps1

@@ -2,7 +2,7 @@
 
 This document provides deep context for AI agents working on the `start-mjig.ps1` codebase.
 
-> **IMPORTANT FOR AI AGENTS**: When modifying `start-mjig.ps1`, you must also update this `CONTEXT.md` file and `README.md` to reflect any changes. This includes:
+> **IMPORTANT FOR AI AGENTS**: When modifying `start-mjig.ps1`, you must also update this `AGENTS.md` file and `README.md` to reflect any changes. This includes:
 > - New or modified parameters
 > - New or renamed functions
 > - Changes to line number ranges in the code structure
@@ -37,17 +37,22 @@ The script is a single-file PowerShell application (~6,000 lines) implementing a
 1. Load assemblies (System.Windows.Forms)
 2. Define P/Invoke types (mJiggAPI namespace)
 3. Initialize variables and theme colors
-4. Define helper functions
+4. Define helper functions (including Invoke-ResizeHandler)
 5. Parse and validate parameters
-6. Enter main processing loop
+6. Show-StartupScreen  (skipped in -DebugMode / -Output hidden)
+7. Show-StartupComplete (skipped in -DebugMode / -Output hidden)
+   └── Calls Invoke-ResizeHandler if window is resized during the screen
+8. Initialize $oldWindowSize / $OldBufferSize to current state
+9. Enter main processing loop
    ├── Wait for interval (with input monitoring)
    ├── Check for user input / hotkeys
+   ├── Detect window resize → Invoke-ResizeHandler (any context)
    ├── Wait for mouse to settle (stutter prevention)
    ├── Perform automated mouse movement
    ├── Send simulated keypress
    ├── Render UI (header, logs, stats, menu)
    └── Handle window resize
-7. Cleanup on exit
+10. Cleanup on exit
 ```
 
 ### Code Structure Map
@@ -80,28 +85,38 @@ start-mjig.ps1
     │   └── Box-drawing character definitions
     │
     ├── Theme Colors Section (lines 214-289)
-    │   ├── Menu bar colors
+    │   ├── Menu bar colors (incl. OnClick pressed-state colors)
     │   ├── Header colors
     │   ├── Stats box colors
     │   ├── Dialog colors (Quit, Time, Movement)
     │   ├── Resize screen colors
     │   └── General UI colors
     │
-    ├── Helper Functions (lines 212-3600)
-    │   ├── Find-WindowHandle (~212-400)
-    │   ├── Buffered Rendering (Write-Buffer, Flush-Buffer, Clear-Buffer) (~1454-1515)
-    │   ├── Draw-DialogShadow / Clear-DialogShadow (~1518-1555)
-    │   ├── Show-TimeChangeDialog (~1557-2220)
-    │   ├── Draw-ResizeLogo (~2225-2320)
-    │   ├── Get-MousePosition (~2326-2340)
-    │   ├── Test-MouseMoved (~2337-2355)
-    │   ├── Get-TimeSinceMs (~2351-2358)
-    │   ├── Get-ValueWithVariance (~2358-2380)
-    │   ├── Get-Padding (~2381-2408)
-    │   ├── Write-SimpleDialogRow (~2409-2434)
-    │   ├── Write-SimpleFieldRow (~2434-2475)
-    │   ├── Show-MovementModifyDialog (~2478-3215)
-    │   └── Show-QuitConfirmationDialog (~3219-3600)
+    ├── Startup Screen Functions (lines ~220-367)
+    │   ├── Show-StartupScreen  — initial "Initializing…" screen (Write-Host, pre-VT100)
+    │   └── Show-StartupComplete — "Initialization Complete" box; keypress-wait or 7-s countdown;
+    │       │                       nested helpers: getSize, drainWakeKeys, handleResize
+    │       │                       getSize calls PeekConsoleInput before reading WindowSize (ConPTY flush)
+    │       │                       handleResize is self-contained; does NOT call Invoke-ResizeHandler
+    │
+    ├── Invoke-ResizeHandler (lines ~383-425)
+    │   └── Unified blocking resize handler for main loop and hidden-mode contexts
+    │
+    ├── Helper Functions (lines ~384-3700)
+    │   ├── Find-WindowHandle (~384-470)
+    │   ├── Buffered Rendering (Write-Buffer, Flush-Buffer, Clear-Buffer, Write-ButtonImmediate) (~1663-1780)
+    │   ├── Draw-DialogShadow / Clear-DialogShadow (~1785-1830)
+    │   ├── Show-TimeChangeDialog (~1835-2410)
+    │   ├── Draw-ResizeLogo (~2495-2610)
+    │   ├── Get-MousePosition (~2615-2630)
+    │   ├── Test-MouseMoved (~2632-2650)
+    │   ├── Get-TimeSinceMs (~2652-2660)
+    │   ├── Get-ValueWithVariance (~2662-2685)
+    │   ├── Get-Padding (~2686-2715)
+    │   ├── Write-SimpleDialogRow (~2716-2745)
+    │   ├── Write-SimpleFieldRow (~2746-2790)
+    │   ├── Show-MovementModifyDialog (~2792-3520)
+    │   └── Show-QuitConfirmationDialog (~3525-3720)
     │
     ├── P/Invoke Type Definitions (lines ~700-900)
     │   ├── POINT struct
@@ -191,9 +206,13 @@ These can be modified at runtime via the Modify Movement dialog. When accessing 
 - `$script:AutoResumeDelaySeconds` - User input cooldown
 - `$script:DiagEnabled` - Diagnostics flag
 - `$script:LoopIteration` - Main loop counter
-- `$script:MenuItemsBounds` - Click detection bounds
+- `$script:MenuItemsBounds` - Click detection bounds array; each entry now also carries `displayText`, `format`, `fg`, `bg`, `hotkeyFg`, `onClickFg`, `onClickBg`, `onClickHotkeyFg`
 - `$script:MenuClickHotkey` - Menu item hotkey triggered by mouse click
 - `$script:ConsoleClickCoords` - Character cell X/Y from last PeekConsoleInput left-click event
+- `$script:PressedMenuButton` - Hotkey of the menu button currently held down (LMB pressed); cleared when pressed state is restored
+- `$script:ButtonClickedAt` - `[DateTime]` timestamp of a confirmed click (UP over button); used alongside `PendingDialogCheck`
+- `$script:PendingDialogCheck` - `$true` after a confirmed click; render loop clears it on the first execution after the action, immediately restoring the button color unless a dialog is open
+- `$script:LButtonWasDown` - Tracks previous LMB state from console `PeekConsoleInput` events for UP-transition detection
 - `$script:RenderQueue` - `System.Collections.Generic.List[hashtable]` used by buffered rendering (`Write-Buffer`/`Flush-Buffer`)
 - `$script:ESC` - `[char]27` for VT100 escape sequences
 - `$script:CursorVisible` - Boolean tracking cursor visibility state for VT100 sequences
@@ -313,11 +332,15 @@ $script:BoxVerticalLeft = [char]0x2524  # ┤
 All colors are centralized as `$script:` variables (lines 214-289):
 
 ```powershell
-# Menu Bar
+# Menu Bar (normal state)
 $script:MenuButtonBg = "DarkBlue"
 $script:MenuButtonText = "White"
 $script:MenuButtonHotkey = "Green"
 $script:MenuButtonPipe = "White"
+# Menu Bar (pressed / onclick state)
+$script:MenuButtonOnClickBg     = "DarkCyan"
+$script:MenuButtonOnClickFg     = "Black"
+$script:MenuButtonOnClickHotkey = "Black"
 
 # Dialogs
 $script:QuitDialogBg = "DarkMagenta"
@@ -330,7 +353,7 @@ $script:QuitDialogTitle = "Yellow"
 **Color categories:**
 | Prefix | Component |
 |--------|-----------|
-| `MenuButton*` | Bottom menu bar |
+| `MenuButton*` | Bottom menu bar (normal + `OnClick*` pressed state) |
 | `Header*` | Top header line |
 | `StatsBox*` | Right-side stats panel |
 | `QuitDialog*` | Quit confirmation dialog |
@@ -338,6 +361,46 @@ $script:QuitDialogTitle = "Yellow"
 | `MoveDialog*` | Modify movement dialog |
 | `Resize*` | Window resize splash screen |
 | `Text*` | General purpose colors |
+
+### 4a. Button Click System
+
+Menu buttons use a multi-phase click model:
+
+**Phase 1 — Mouse DOWN** (`PeekConsoleInput` handler):
+- Detect which `$script:MenuItemsBounds` entry is under the cursor
+- Set `$script:PressedMenuButton = $btn.hotkey`
+- Immediately call `Write-ButtonImmediate` with `onClickFg`/`onClickBg`/`onClickHotkeyFg` + `Flush-Buffer` — gives instant visual feedback without waiting for the next frame
+
+**Phase 2 — Mouse UP over same button** (confirmed click):
+- Set `$script:ConsoleClickCoords` to trigger the action
+- Set `$script:ButtonClickedAt = Get-Date` and `$script:PendingDialogCheck = $true`
+- Leave `$script:PressedMenuButton` set — render loop handles restoration
+
+**Phase 2 — Mouse UP outside button** (cancelled click):
+- `Start-Sleep 100ms` brief delay, then `Write-ButtonImmediate` with normal colors
+- Clear `$script:PressedMenuButton` immediately
+
+**Phase 3 — Render loop restoration** (top of menu bar render, checks `$script:PendingDialogCheck`):
+- `$script:DialogButtonBounds -eq $null` (no dialog open) → clears `$script:PressedMenuButton` immediately — handles toggles (v, h) and instant actions
+- `$script:DialogButtonBounds -ne $null` (dialog open) → skips; button stays pressed while dialog is open
+
+**Popup persistence**: Dialog-opening actions (q, t, m) call `Show-*Dialog` synchronously, blocking the main loop. The button stays visually highlighted (from Phase 1) throughout because no main render runs during the dialog. When the dialog closes, `DialogButtonBounds` is cleared and the next render's `PendingDialogCheck` fires the restore.
+
+**`Write-ButtonImmediate` function** (near `Flush-Buffer` definition):
+- Params: `$btn` (bounds entry), `$fg`, `$bg`, `$hotkeyFg`
+- Reads `$btn.displayText` and `$btn.format` to render full button text with emoji/pipe splitting
+- Calls `Flush-Buffer` at the end for immediate console output
+
+**`$script:MenuItemsBounds` entry schema:**
+```
+startX, endX, y        — click hit area
+hotkey                 — single character hotkey
+index                  — position in menuItems array
+displayText            — current format text string (for Write-ButtonImmediate)
+format                 — menuFormat int (0=emoji|pipe, 1=noIcons, 2=short)
+fg, bg, hotkeyFg       — normal render colors
+onClickFg, onClickBg, onClickHotkeyFg  — pressed-state colors
+```
 
 ### 5. Mouse Stutter Prevention
 
@@ -367,33 +430,89 @@ Input detection during the wait loop uses `PeekConsoleInput` for keyboard, scrol
 
 ### 6. Window Resize Handling
 
-When the console window is resized:
+There are two resize handler paths: a **self-contained `handleResize`** for the welcome screen, and the **`Invoke-ResizeHandler`** function for everything after initialization.
 
-1. **Detection**: Compare `$Host.UI.RawUI.WindowSize` against stored size
-2. **Clear+Draw**: Atomically clear screen and draw logo via `Draw-ResizeLogo -ClearFirst`
-3. **Logo**: Draw centered "mJig(🐀)" with decorative box
-4. **Quote**: Display random playful quote from `$script:ResizeQuotes`
-5. **Wait**: Stay in tight loop, redrawing only on size change
-6. **Debounce**: Wait 2 seconds after resize stops before full UI redraw
+#### Size detection: use `GetConsoleScreenBufferInfo` directly
+
+`$Host.UI.RawUI.WindowSize` and `[Console]::WindowWidth` both go through managed wrapper code that can return stale values. The welcome screen's `getSize` and `handleResize` use `[mJiggAPI.Mouse]::GetConsoleScreenBufferInfo` (the raw Win32 P/Invoke on the **stdout** handle, `GetStdHandle(-11)`) and read `srWindow.Right - srWindow.Left + 1` / `srWindow.Bottom - srWindow.Top + 1` directly. This is the lowest-level path possible and always returns the current terminal dimensions.
 
 ```powershell
-# Resize detection
-$currentSize = $Host.UI.RawUI.WindowSize
-$isNewSize = ($currentSize.Width -ne $PendingResizeWidth) -or 
-             ($currentSize.Height -ne $PendingResizeHeight)
-
-if ($isNewSize -and -not $ResizeClearedScreen) {
-    $script:CurrentResizeQuote = $null
-    Draw-ResizeLogo -ClearFirst
-    $ResizeClearedScreen = $true
+$csbi = New-Object mJiggAPI.CONSOLE_SCREEN_BUFFER_INFO
+$hOut = [mJiggAPI.Mouse]::GetStdHandle(-11)   # STD_OUTPUT_HANDLE
+if ([mJiggAPI.Mouse]::GetConsoleScreenBufferInfo($hOut, [ref]$csbi)) {
+    $w = [int]($csbi.srWindow.Right  - $csbi.srWindow.Left + 1)
+    $h = [int]($csbi.srWindow.Bottom - $csbi.srWindow.Top  + 1)
 }
 ```
 
-The `Draw-ResizeLogo` function:
+#### Welcome screen: `handleResize` (nested inside `Show-StartupComplete`)
+
+Self-contained; does **not** call `Invoke-ResizeHandler` or `Send-ResizeExitWakeKey`.
+
+Before the outer polling loop starts, `Restore-ConsoleInputMode` and `Send-ResizeExitWakeKey` are called once to prime Windows Terminal's input routing (same mechanism used after main-loop resizes). `drainWakeKeys` is then called to consume the injected events before real keypress detection begins.
+
+1. Read initial size via `getSize` (direct CSBI call)
+2. Draw logo (or clear on error)
+3. 10ms poll loop: `GetConsoleScreenBufferInfo` directly → detect change → redraw logo
+4. Stability: 1500ms with no size change AND LMB released → break
+5. `[Console]::Clear()`, `Restore-ConsoleInputMode`, `drainWakeKeys`, redraw welcome box
+
+#### `drainWakeKeys` (nested inside `Show-StartupComplete`)
+
+Drains the **entire** console input buffer and returns `$true` if any genuine keypress was found.
+
+Critical rules (each learned from a diagnosed bug):
+- **`IncludeKeyDown,IncludeKeyUp`** — `IncludeKeyDown` alone causes `ReadKey` to block indefinitely on KeyUp events, freezing the polling loop.
+- **Drain the whole buffer, never return early** — if a stale KeyUp (e.g. the Enter used to run the script) causes an early return, the synthetic wake key events are left behind in the buffer and counted as real keypresses on the next tick.
+- **Filter `VK_MENU` (18) as well as `VK_RMENU` (165)** — `Send-ResizeExitWakeKey` injects `VK_RMENU` (0xA5), but the Windows console input layer reports it as `VK_MENU` (18) in `INPUT_RECORD` keyboard events. See gotcha below.
+- **Filter all modifier VKs** — Shift (16), Ctrl (17), Alt (18), and their L/R variants (160–165) are never "press any key".
+- **Only count `KeyDown=true` as a real keypress** — stale KeyUp events from any previous key are discarded.
+
+```powershell
+$_wakeVKs = @(16, 17, 18, 160, 161, 162, 163, 164, 165)
+function drainWakeKeys {
+    $_real = $false
+    try {
+        while ($Host.UI.RawUI.KeyAvailable) {
+            $k = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown,IncludeKeyUp,AllowCtrlC")
+            if ($k.KeyDown -and $k.VirtualKeyCode -notin $_wakeVKs) { $_real = $true }
+        }
+    } catch {}
+    return $_real
+}
+```
+
+#### Main loop: `Invoke-ResizeHandler`
+
+Called from: the main wait loop resize check, and the per-iteration outside-wait-loop resize check. Not called from the welcome screen.
+
+1. **Enter**: Reset `$script:CurrentResizeQuote` and `$script:ResizeLogoLockedHeight`
+2. **Initial draw**: `Draw-ResizeLogo -ClearFirst` (normal mode) or `[Console]::Clear()` (hidden mode)
+3. **1ms poll loop**:
+   - Read `$psw.WindowSize` on every iteration (main loop already calls PeekConsoleInput externally)
+   - If size changed: update pending size, reset stability timer, redraw logo (or nothing in hidden mode)
+   - Every 50 redraws: `[Console]::Clear()` + `Restore-ConsoleInputMode` to prevent artifact buildup
+   - Check stability: if `$elapsed -ge $ResizeThrottleMs` (1500ms) AND LMB not held → exit
+4. **Exit**: `[Console]::Clear()`, `Restore-ConsoleInputMode`, `Send-ResizeExitWakeKey`, `return $pendingSize`
+
+```powershell
+# Callers use the returned stable size to update their tracking state:
+$stableSize = Invoke-ResizeHandler
+$oldWindowSize = $stableSize
+$HostWidth     = $stableSize.Width
+$HostHeight    = $stableSize.Height
+```
+
+**LMB gate**: After the stability timer expires, the exit is deferred if `GetAsyncKeyState(0x01) -band 0x8000` is set (mouse button still held). The timer is **not** reset by mouse state — only new size changes reset it.
+
+**`$oldWindowSize` initialization**: Both `$oldWindowSize` and `$OldBufferSize` are set to the current live values immediately before the `:process while ($true)` main loop starts. This prevents the first-iteration `$null` comparison from triggering a spurious resize screen on every startup.
+
+**`Draw-ResizeLogo` function:**
 - Accepts `-ClearFirst` switch (passed through to `Flush-Buffer`)
 - Calculates center position for logo
 - Draws box with dynamic padding (42% of available space)
-- Queues all segments via `Write-Buffer`, then `Flush-Buffer` (or `Flush-Buffer -ClearFirst`) at the end
+- Locks height during resize to absorb ±1 transient row fluctuations (Windows Terminal reflow)
+- Queues all segments via `Write-Buffer`, then `Flush-Buffer -ClearFirst` at the end
 - Shows random quote 2 lines below logo
 
 ### 7. Dialog System
@@ -603,7 +722,7 @@ $script:NewComponentBg = "DarkBlue"
 Write-Buffer -Text "text" -FG $script:NewComponentColor -BG $script:NewComponentBg
 ```
 
-3. Update CONTEXT.md color categories table.
+3. Update `resources/AGENTS.md` color categories table.
 
 ### Adding a New Parameter
 
@@ -691,6 +810,32 @@ If you see `â"Œ` or similar garbage, the file encoding has been corrupted. Fix
 1. Re-saving with UTF-8 BOM encoding
 2. Better: Convert all literal box chars to `[char]` casts
 
+### Resize Detection: Use `GetConsoleScreenBufferInfo` Directly (CRITICAL)
+
+`$Host.UI.RawUI.WindowSize` and `[Console]::WindowWidth` both go through managed wrappers that can return stale values. For reliable resize detection in a polling loop, call `GetConsoleScreenBufferInfo` on the **stdout** handle directly and read `srWindow`:
+
+```powershell
+# CORRECT - direct Win32, always current
+$csbi = New-Object mJiggAPI.CONSOLE_SCREEN_BUFFER_INFO
+$hOut = [mJiggAPI.Mouse]::GetStdHandle(-11)   # STD_OUTPUT_HANDLE (-11)
+if ([mJiggAPI.Mouse]::GetConsoleScreenBufferInfo($hOut, [ref]$csbi)) {
+    $w = [int]($csbi.srWindow.Right  - $csbi.srWindow.Left + 1)
+    $h = [int]($csbi.srWindow.Bottom - $csbi.srWindow.Top  + 1)
+}
+```
+
+Note: use `GetStdHandle(-11)` (stdout) for `GetConsoleScreenBufferInfo`, not `-10` (stdin).
+
+### `VK_RMENU` (165) Appears as `VK_MENU` (18) in Console Input Records (CRITICAL)
+
+`Send-ResizeExitWakeKey` injects `VK_RMENU` (0xA5 = 165) via `keybd_event`. However, the Windows console input layer reports this in `INPUT_RECORD` keyboard events with `wVirtualKeyCode = 18` (`VK_MENU`), **not** 165. Any code that filters wake keys by checking `VirtualKeyCode -eq 165` will miss them entirely. Always filter both 18 and 165 (and all other modifier VKs 16, 160–165) when reading from the console input buffer.
+
+### `ReadKey("IncludeKeyDown")` Blocks Indefinitely on KeyUp Events
+
+`$Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")` waits for a KeyDown event and **skips** KeyUp events — meaning if a KeyUp event is at the front of the buffer, `ReadKey` hangs waiting for the next KeyDown. `KeyAvailable` returns `$true` for both KeyDown and KeyUp, so calling `ReadKey("IncludeKeyDown")` after a truthy `KeyAvailable` check can freeze the entire polling loop indefinitely.
+
+**Always use `"NoEcho,IncludeKeyDown,IncludeKeyUp,AllowCtrlC"`** when draining the input buffer. Filter KeyDown/KeyUp in code after the read.
+
 ### Console Buffer vs Window Size
 
 ```powershell
@@ -768,26 +913,26 @@ Windows Terminal has a setting "Automatically adjust lightness of indistinguisha
 │                         MAIN LOOP                               │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐  │
-│  │  WAIT    │───►│  SETTLE  │───►│  MOVE    │───►│  RENDER  │  │
-│  │  LOOP    │    │  CHECK   │    │  CURSOR  │    │  UI      │  │
-│  └────┬─────┘    └──────────┘    └──────────┘    └────┬─────┘  │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐   │
+│  │  WAIT    │───►│  SETTLE  │───►│  MOVE    │───►│  RENDER  │   │
+│  │  LOOP    │    │  CHECK   │    │  CURSOR  │    │  UI      │   │
+│  └────┬─────┘    └──────────┘    └──────────┘    └────┬─────┘   │
 │       │                                               │         │
-│       │  ┌──────────────────────────────────────┐    │         │
-│       └──┤  Hotkey / Click / Resize Detection   ├────┘         │
-│          └──────────────────────────────────────┘              │
+│       │  ┌──────────────────────────────────────┐     │         │
+│       └──┤  Hotkey / Click / Resize Detection   ├─────┘         │
+│          └──────────────────────────────────────┘               │
 │                          │                                      │
-│          ┌───────────────┼───────────────┐                     │
-│          ▼               ▼               ▼                     │
-│    ┌──────────┐    ┌──────────┐    ┌──────────┐               │
-│    │  QUIT    │    │  TIME    │    │  MOVE    │               │
-│    │  DIALOG  │    │  DIALOG  │    │  DIALOG  │               │
-│    └──────────┘    └──────────┘    └──────────┘               │
+│          ┌───────────────┼───────────────┐                      │
+│          ▼               ▼               ▼                      │
+│    ┌──────────┐    ┌──────────┐    ┌──────────┐                 │
+│    │  QUIT    │    │  TIME    │    │  MOVE    │                 │
+│    │  DIALOG  │    │  DIALOG  │    │  DIALOG  │                 │
+│    └──────────┘    └──────────┘    └──────────┘                 │
 │                                                                 │
-│    ┌──────────────────────────────────────────────────────┐    │
-│    │               RESIZE HANDLING LOOP                    │    │
-│    │  (Clear screen → Draw logo → Wait for completion)     │    │
-│    └──────────────────────────────────────────────────────┘    │
+│    ┌──────────────────────────────────────────────────────┐     │
+│    │               RESIZE HANDLING LOOP                   │     │
+│    │  (Clear screen → Draw logo → Wait for completion)    │     │
+│    └──────────────────────────────────────────────────────┘     │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -812,21 +957,29 @@ Windows Terminal has a setting "Automatically adjust lightness of indistinguisha
 |------|---------|
 | `start-mjig.ps1` | Main script (single file) |
 | `README.md` | User documentation |
-| `CONTEXT.md` | AI agent context (this file) |
+| `resources/AGENTS.md` | AI agent context (this file) |
+| `resources/test-logs.ps1` | Temporary test script for log rendering (git-ignored) |
 | `CHANGELOG.md` | Change tracking across commits |
-| `.gitignore` | Excludes `_diag/` and backup files from git |
+| `.gitignore` | Excludes `_diag/`, backup files, and `resources/*.ps1` from git |
 | `_diag/startup.txt` | Initialization diagnostics (created with `-Diag`) |
 | `_diag/settle.txt` | Mouse settle detection logs (created with `-Diag`) |
 | `_diag/input.txt` | PeekConsoleInput + GetLastInputInfo input detection logs (created with `-Diag`) |
+| `_diag/welcome.txt` | Welcome screen resize detection diagnostics (**always written**, no `-Diag` flag needed) |
 
-The `_diag/` folder is created in the same directory as `start-mjig.ps1` when run with `-Diag`. It is git-ignored. AI agents can read these files directly from the project directory to diagnose runtime issues.
+The `_diag/` folder is at the **project root** (`c:\Projects\mJigg\_diag\`), one level above the script (`Start-mJig\`). The script uses `Split-Path $PSScriptRoot -Parent` to build the path so it lands at the project root regardless of where the script file lives within the repo. `welcome.txt` is always written regardless of `-Diag`; all other diag files require the `-Diag` flag. All diag files are git-ignored.
+
+> **TEMPORARY TEST SCRIPTS**: When an agent creates a throwaway `.ps1` script to test or experiment with something (e.g. testing rendering logic, validating a calculation), place it in `resources/`. All `resources/*.ps1` files are git-ignored. Do NOT place temp scripts in the project root or elsewhere. Note: `_diag/` (at the project root, not inside `Start-mJig/`) is separate — it is for runtime diagnostic output produced by the script itself (via `-Diag` or always-on), not for agent-authored test scripts.
 
 **When reviewing diagnostic output with the user**, always provide a ready-to-run command to print the relevant diag file. The user expects this every time. Use:
 
 ```powershell
+# Run these from the project root (c:\Projects\mJigg)
 Get-Content ".\_diag\input.txt"
 Get-Content ".\_diag\startup.txt"
 Get-Content ".\_diag\settle.txt"
+Get-Content ".\_diag\welcome.txt"   # always present, no -Diag flag needed
+# Or full paths:
+Get-Content "c:\Projects\mJigg\_diag\welcome.txt"
 ```
 
 No external dependencies - the script is fully self-contained.
@@ -840,19 +993,25 @@ No external dependencies - the script is fully self-contained.
 | Parameters | 41-120 |
 | Box Characters | 124-132 |
 | Theme Colors | 134-210 |
-| Buffered Rendering Functions | 1454-1515 |
-| P/Invoke Types | 700-900 |
-| Draw-DialogShadow / Clear-DialogShadow | 1518-1555 |
-| Show-TimeChangeDialog | 1557-2220 |
-| Draw-ResizeLogo | 2225-2320 |
-| Get-MousePosition / Test-MouseMoved | 2326-2355 |
-| Write-SimpleDialogRow / Write-SimpleFieldRow | 2409-2475 |
-| Show-MovementModifyDialog | 2478-3215 |
-| Show-QuitConfirmationDialog | 3219-3600 |
-| Main Loop Start | 3654 |
-| Wait Loop | 3706-4400 |
-| Resize Handling | 4400-4800 |
-| UI Rendering | 5000-5930 |
-| Menu Rendering | 5600-5930 |
+| Show-StartupScreen | ~220-252 |
+| Show-StartupComplete | ~253-355 |
+| Invoke-ResizeHandler | ~341-382 |
+| Find-WindowHandle | ~384-470 |
+| P/Invoke Types | ~700-980 |
+| Buffered Rendering Functions (Write-Buffer, Flush-Buffer, Write-ButtonImmediate) | ~1663-1780 |
+| Draw-DialogShadow / Clear-DialogShadow | ~1785-1830 |
+| Show-TimeChangeDialog | ~1835-2410 |
+| Draw-ResizeLogo | ~2495-2610 |
+| Get-MousePosition / Test-MouseMoved | ~2615-2650 |
+| Write-SimpleDialogRow / Write-SimpleFieldRow | ~2716-2790 |
+| Show-MovementModifyDialog | ~2792-3520 |
+| Show-QuitConfirmationDialog | ~3525-3720 |
+| $oldWindowSize / $OldBufferSize init (pre-main-loop) | ~3944-3950 |
+| Main Loop Start | ~3955 |
+| Wait Loop | ~3970-4860 |
+| Resize Detection (wait loop, calls Invoke-ResizeHandler) | ~4760-4855 |
+| Resize Detection (outside wait loop, calls Invoke-ResizeHandler) | ~4900-4960 |
+| UI Rendering | ~5100-6050 |
+| Menu Rendering | ~5700-6050 |
 
-*Note: Line numbers are approximate and may shift as code is modified.*
+*Note: Line numbers are approximate and shift as code is modified.*
