@@ -36,12 +36,12 @@
 		$lineBlank  = $script:BoxVertical   + (" "   * $inner) + $script:BoxVertical
 		$lineBottom = $script:BoxBottomLeft + ($hLine * $inner) + $script:BoxBottomRight
 
-		$emojiScreen  = [char]::ConvertFromUtf32(0x1F4BB) # screen
-		$emojiDebug   = [char]::ConvertFromUtf32(0x1F50D) # search
-		$emojiNotify  = [char]::ConvertFromUtf32(0x1F514) # bell
-		$emojiTitle   = [char]::ConvertFromUtf32(0x1F3F7) # label
-		$emojiApply   = [char]::ConvertFromUtf32(0x2705)  # checkmark
-		$emojiClose   = [char]::ConvertFromUtf32(0x274C)  # red X
+	$emojiScreen  = [char]::ConvertFromUtf32(0x1F4BB) # screen
+	$emojiDebug   = [char]::ConvertFromUtf32(0x1F50D) # search
+	$emojiNotify  = [char]::ConvertFromUtf32(0x1F514) # bell
+	$emojiTitle   = [char]::ConvertFromUtf32(0x1F3F7) # label
+	$emojiApply   = [char]::ConvertFromUtf32(0x2705)  # checkmark
+	$emojiClose   = [char]::ConvertFromUtf32(0x274C)  # red X
 
 		$drawOptionsBtnRow = {
 			param($DialogX, $RowY, $emoji, $hotkeyChar, $labelSuffix, $RowPadding, $ButtonBackground, $ButtonTextColor, $btnHotkey, $BackgroundColor, $borderColor, $labelPrefix = "")
@@ -100,15 +100,15 @@
 					$notificationLabelSuffix = if ($script:NotificationsEnabled) { "otifications: On " } else { "otifications: Off" }
 					$notificationRowPadding    = $dialogWidth - (2 + $dialogBracketWidth + $dialogIconWidth + 3 + $notificationLabelSuffix.Length + $dialogParenOffset + 1)
 					& $drawOptionsBtnRow $DialogX $rowY $emojiNotify "n" $notificationLabelSuffix ([math]::Max(0, $notificationRowPadding)) $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder
-				} elseif ($i -eq 10) {
-				$currentTitleName = $script:TitlePresets[$script:TitlePresetIndex].Name
-				$maxTitleLength = $dialogWidth - (2 + $dialogBracketWidth + $dialogIconWidth + 10 + $dialogParenOffset + 1)
-				if ($currentTitleName.Length -gt $maxTitleLength) { $currentTitleName = $currentTitleName.Substring(0, [math]::Max(0, $maxTitleLength - 1)) + [char]0x2026 }
-					$titleLabelSuffix = "indow: $currentTitleName"
-					$titleRowPadding = $dialogWidth - (2 + $dialogBracketWidth + $dialogIconWidth + 3 + $titleLabelSuffix.Length + $dialogParenOffset + 1)
-					& $drawOptionsBtnRow $DialogX $rowY $emojiTitle "w" $titleLabelSuffix ([math]::Max(0, $titleRowPadding)) $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder
-				} elseif ($i -eq 12) {
-					$_applyX   = $DialogX + 2
+			} elseif ($i -eq 10) {
+			$currentTitleName = $script:TitlePresets[$script:TitlePresetIndex].Name
+			$maxTitleLength = $dialogWidth - (2 + $dialogBracketWidth + $dialogIconWidth + 10 + $dialogParenOffset + 1)
+			if ($currentTitleName.Length -gt $maxTitleLength) { $currentTitleName = $currentTitleName.Substring(0, [math]::Max(0, $maxTitleLength - 1)) + [char]0x2026 }
+				$titleLabelSuffix = "indow: $currentTitleName"
+				$titleRowPadding = $dialogWidth - (2 + $dialogBracketWidth + $dialogIconWidth + 3 + $titleLabelSuffix.Length + $dialogParenOffset + 1)
+				& $drawOptionsBtnRow $DialogX $rowY $emojiTitle "w" $titleLabelSuffix ([math]::Max(0, $titleRowPadding)) $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder
+			} elseif ($i -eq 12) {
+				$_applyX   = $DialogX + 2
 					$_cancelX  = $_applyX + $applyBtnChars + 2
 					Write-Buffer -X $DialogX -Y $rowY -Text "$($script:BoxVertical) " -FG $localBorder -BG $localBg
 					if ($script:DialogButtonShowBrackets) { Write-Buffer -X $_applyX -Y $rowY -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
@@ -135,11 +135,11 @@
 					if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
 					Write-Buffer -Text (" " * $applyRowPadding) -BG $localBg
 					Write-Buffer -Text $script:BoxVertical -FG $localBorder -BG $localBg
-				} elseif ($i -eq $dialogHeight) {
-					Write-Buffer -X $DialogX -Y $rowY -Text $lineBottom -FG $localBorder -BG $localBg
-				} elseif ($i -eq 3 -or $i -eq 5 -or $i -eq 7 -or $i -eq 9 -or $i -eq 11 -or $i -eq 13) {
-					Write-Buffer -X $DialogX -Y $rowY -Text $lineBlank -FG $localText -BG $localBg
-				}
+			} elseif ($i -eq $dialogHeight) {
+				Write-Buffer -X $DialogX -Y $rowY -Text $lineBottom -FG $localBorder -BG $localBg
+			} elseif ($i -eq 3 -or $i -eq 5 -or $i -eq 7 -or $i -eq 9 -or $i -eq 11 -or $i -eq 13) {
+				Write-Buffer -X $DialogX -Y $rowY -Text $lineBlank -FG $localText -BG $localBg
+			}
 			}
 		}
 
@@ -191,19 +191,18 @@
 				if ($clickX -lt $dialogX -or $clickX -ge ($dialogX + $dialogWidth) -or $clickY -lt $dialogY -or $clickY -gt ($dialogY + $dialogHeight)) {
 					$char = "c"; $keyProcessed = $true
 				} else {
-					$_rowInDialog = $clickY - $dialogY
-					if ($_rowInDialog -eq 4)  { $char = "o"; $keyProcessed = $true }
-					if ($_rowInDialog -eq 6)  { $char = "d"; $keyProcessed = $true }
-					if ($_rowInDialog -eq 8)  { $char = "n"; $keyProcessed = $true }
-					if ($_rowInDialog -eq 10) { $char = "w"; $keyProcessed = $true }
-					if ($_rowInDialog -eq 12) {
-						$_applyStartX  = $dialogX + 2
-						$_applyEndX    = $_applyStartX + $applyBtnChars - 1
-						$_cancelStartX = $_applyStartX + $applyBtnChars + 2
-						$_cancelEndX   = $_cancelStartX + $cancelBtnChars - 1
-						if ($clickX -ge $_applyStartX -and $clickX -le $_applyEndX)   { $char = "a"; $keyProcessed = $true }
-						elseif ($clickX -ge $_cancelStartX -and $clickX -le $_cancelEndX) { $char = "c"; $keyProcessed = $true }
-					}
+			if ($_rowInDialog -eq 4)  { $char = "o"; $keyProcessed = $true }
+			if ($_rowInDialog -eq 6)  { $char = "d"; $keyProcessed = $true }
+			if ($_rowInDialog -eq 8)  { $char = "n"; $keyProcessed = $true }
+			if ($_rowInDialog -eq 10) { $char = "w"; $keyProcessed = $true }
+			if ($_rowInDialog -eq 12) {
+				$_applyStartX  = $dialogX + 2
+				$_applyEndX    = $_applyStartX + $applyBtnChars - 1
+				$_cancelStartX = $_applyStartX + $applyBtnChars + 2
+				$_cancelEndX   = $_cancelStartX + $cancelBtnChars - 1
+				if ($clickX -ge $_applyStartX -and $clickX -le $_applyEndX)   { $char = "a"; $keyProcessed = $true }
+				elseif ($clickX -ge $_cancelStartX -and $clickX -le $_cancelEndX) { $char = "c"; $keyProcessed = $true }
+			}
 				}
 			}
 
@@ -257,52 +256,52 @@
 				& $drawOptionsDialog $dialogX $dialogY
 				Flush-Buffer
 
-			} elseif ($char -eq "w" -or $char -eq "W") {
-			$script:TitlePresetIndex = ($script:TitlePresetIndex + 1) % $script:TitlePresets.Count
-			$_preset = $script:TitlePresets[$script:TitlePresetIndex]
-			$script:WindowTitle = $_preset.Name
-			$script:TitleEmoji  = $_preset.Emoji
-			try { $Host.UI.RawUI.WindowTitle = if ($script:DebugMode) { "$($script:WindowTitle) - Debug Mode" } else { $script:WindowTitle } } catch {}
-			$needsRedraw = $true
-			$titleChanged = $true
-			$currentDate = Get-Date
-			$null = $LogArrayRef.Value.Add([PSCustomObject]@{ logRow = $true; components = @(
-				@{ priority = 1; text = $currentDate.ToString(); shortText = $currentDate.ToString("HH:mm:ss") },
-				@{ priority = 2; text = " - Window title: $($script:WindowTitle)"; shortText = " - Title changed" }
-			)})
-			& $drawOptionsDialog $dialogX $dialogY
-			Flush-Buffer
+		} elseif ($char -eq "w" -or $char -eq "W") {
+		$script:TitlePresetIndex = ($script:TitlePresetIndex + 1) % $script:TitlePresets.Count
+		$_preset = $script:TitlePresets[$script:TitlePresetIndex]
+		$script:WindowTitle = $_preset.Name
+		$script:TitleEmoji  = $_preset.Emoji
+		try { $Host.UI.RawUI.WindowTitle = if ($script:DebugMode) { "$($script:WindowTitle) - Debug Mode" } else { $script:WindowTitle } } catch {}
+		$needsRedraw = $true
+		$titleChanged = $true
+		$currentDate = Get-Date
+		$null = $LogArrayRef.Value.Add([PSCustomObject]@{ logRow = $true; components = @(
+			@{ priority = 1; text = $currentDate.ToString(); shortText = $currentDate.ToString("HH:mm:ss") },
+			@{ priority = 2; text = " - Window title: $($script:WindowTitle)"; shortText = " - Title changed" }
+		)})
+		& $drawOptionsDialog $dialogX $dialogY
+		Flush-Buffer
 
-			} elseif ($char -eq "a" -or $char -eq "A" -or $key -eq "Enter" -or
-				      $char -eq [char]13 -or $char -eq [char]10) {
-				# Apply — keep all changes and close
-				break :optionsLoop
+	} elseif ($char -eq "a" -or $char -eq "A" -or $key -eq "Enter" -or
+			      $char -eq [char]13 -or $char -eq [char]10) {
+			# Apply — keep all changes and close
+			break :optionsLoop
 
-			} elseif ($char -eq "c" -or $char -eq "C" -or $key -eq "Escape" -or
-				      ($null -ne $keyInfo -and $keyInfo.VirtualKeyCode -eq 27)) {
-				# Cancel — revert all changes made during this dialog session
-				if ($script:DebugMode -ne $initialDebugMode) {
-					$script:DebugMode = $initialDebugMode
-					if ($script:DebugMode) { Set-ThemeProfile -Name "debug" } else { Set-ThemeProfile -Name "default" }
-					$needsRedraw = $true
-				}
-				if ($script:Output -ne $initialOutput) {
-					$script:Output = $initialOutput
-					$needsRedraw = $true
-				}
-				if ($script:NotificationsEnabled -ne $initialNotificationsEnabled) {
-					$script:NotificationsEnabled = $initialNotificationsEnabled
-				}
-				if ($script:TitlePresetIndex -ne $initialTitlePresetIndex) {
-					$script:TitlePresetIndex = $initialTitlePresetIndex
-					$script:WindowTitle      = $initialWindowTitle
-					$script:TitleEmoji       = $initialTitleEmoji
-					try { $Host.UI.RawUI.WindowTitle = if ($script:DebugMode) { "$($script:WindowTitle) - Debug Mode" } else { $script:WindowTitle } } catch {}
-					$needsRedraw  = $true
-					$titleChanged = $false
-				}
-				break :optionsLoop
+		} elseif ($char -eq "c" -or $char -eq "C" -or $key -eq "Escape" -or
+			      ($null -ne $keyInfo -and $keyInfo.VirtualKeyCode -eq 27)) {
+			# Cancel — revert all changes made during this dialog session
+			if ($script:DebugMode -ne $initialDebugMode) {
+				$script:DebugMode = $initialDebugMode
+				if ($script:DebugMode) { Set-ThemeProfile -Name "debug" } else { Set-ThemeProfile -Name "default" }
+				$needsRedraw = $true
 			}
+			if ($script:Output -ne $initialOutput) {
+				$script:Output = $initialOutput
+				$needsRedraw = $true
+			}
+		if ($script:NotificationsEnabled -ne $initialNotificationsEnabled) {
+			$script:NotificationsEnabled = $initialNotificationsEnabled
+		}
+		if ($script:TitlePresetIndex -ne $initialTitlePresetIndex) {
+				$script:TitlePresetIndex = $initialTitlePresetIndex
+				$script:WindowTitle      = $initialWindowTitle
+				$script:TitleEmoji       = $initialTitleEmoji
+				try { $Host.UI.RawUI.WindowTitle = if ($script:DebugMode) { "$($script:WindowTitle) - Debug Mode" } else { $script:WindowTitle } } catch {}
+				$needsRedraw  = $true
+				$titleChanged = $false
+			}
+			break :optionsLoop
+		}
 
 			try {
 				while ($Host.UI.RawUI.KeyAvailable) { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown,AllowCtrlC") }

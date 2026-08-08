@@ -42,11 +42,11 @@ A feature-rich PowerShell mouse jiggler with a console-based TUI, designed to ke
 # Import the module (do this once per session)
 Import-Module C:\Projects\mJig\Start-mJig\Start-mJig.psm1
 
-# Run with defaults (no end time, minimal view)
+# Run with defaults (no end time, full view)
 Start-mJig
 
-# Run with full interface
-Start-mJig -Output full
+# Run with minimal interface
+Start-mJig -Output min
 
 # Run until 5:30 PM
 Start-mJig -EndTime 1730
@@ -56,7 +56,7 @@ Start-mJig -Output hidden
 
 # Debugging one-liner: isolated session with full output and debug mode
 $mJig = "C:\Projects\mJig\Start-mJig\Start-mJig.psm1"
-powershell -NoProfile -Command "Import-Module '$mJig'; Start-mJig -Output full -DebugMode"
+powershell -NoProfile -Command "Import-Module '$mJig'; Start-mJig -DebugMode"
 ```
 
 > **Note:** mJig automatically runs inside its own isolated, controlled runspace — separate from your session's profile, aliases, and loaded modules. No manual session management is needed. Closing the terminal window (clicking X) terminates the viewer instantly — a native `SetConsoleCtrlHandler` callback calls `TerminateProcess` directly, bypassing PowerShell's normal 5-second graceful shutdown period.
@@ -81,7 +81,7 @@ Start-mJig -Inline
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-Output` | string | `"min"` | View mode: `full`, `min`, or `hidden` |
+| `-Output` | string | `"full"` | View mode: `full`, `min`, or `hidden` |
 | `-EndTime` | string | `"0"` | Stop time in 24hr format (e.g., `1730` for 5:30 PM). `0` = no end time |
 | `-EndVariance` | int | `0` | Random variance in minutes for end time |
 | `-IntervalSeconds` | double | `2` | Base interval between movement cycles |
@@ -109,9 +109,12 @@ While running, use these keyboard shortcuts:
 | `m` | Open movement settings (also accessible via Settings) |
 | `o` | Toggle between full/min output view |
 | `i` | Toggle incognito (hidden) mode |
+| `d` | Toggle display sleep (DDC/CI) — clicking the menu button shows a confirmation dialog; `d` key or global hotkey bypasses it |
 | `?` or `/` | Open Info/About dialog |
 | `Shift+M+P` | Toggle manual pause/resume (global hotkey, works from any window) |
 | `Shift+M+Q` | Immediate quit (global hotkey, no confirmation dialog) |
+| `Shift+M+D` | Toggle display sleep (global hotkey, primary) |
+| `Shift+M+S` | Toggle display sleep (global hotkey, secondary) |
 
 You can also click menu buttons with your mouse. Buttons respond visually on press (onclick highlight color) and fire the action on release. Dragging the mouse off a button before releasing cancels the action. When a button opens a dialog, it stays highlighted for the duration of that dialog to indicate which menu is active. Clicking the mJig logo in the header opens the Info dialog.
 
@@ -128,6 +131,19 @@ You can also click menu buttons with your mouse. Buttons respond visually on pre
 - `(d)ebug: On/Off` — inline toggle for debug mode
 - `(n)otifications: On/Off` — enable/disable Windows toast notifications
 - `(w)indow Title` — cycle through preset window title disguises
+
+**Display Sleep** (click the `(d)isplay` menu button):
+- Brief description of DDC/CI sleep (apps remain active; Windows power management is not involved)
+- `(u)audio cues: On/Off` — enable/disable sleep/wake beeps (on by default)
+- `(t)imed sleep: On/Off` — recurring auto-sleep: while enabled, the display re-sleeps after the configured idle timeout every time you stop using the computer (not a one-shot timer)
+- Timeout field — idle seconds before each auto-sleep (default 60)
+- `(s)leep` — save settings and sleep now; `(a)pply` — save settings without sleeping; `(c)ancel` — discard changes
+
+> **Display sleep hardware requirement**: Uses DDC/CI (`dxva2.dll` VCP `0xD6`) — **Standby (`2`)** to blank the panel, **On (`1`)** to wake. Not Windows power management (the OS still sees the display as on; apps remain active). Requires a DDC/CI-capable monitor; skipped gracefully otherwise. Avoids VCP Off (`4`/`5`), which on many monitors kills the DDC channel and requires a physical power-cycle to recover.
+>
+> The `(d)isplay` menu button shows 💤 when display sleep is available and 🌑 when the display is currently sleeping. Clicking the menu button opens the Display Sleep dialog (description + audio/timed-sleep settings). The `d` keyboard shortcut and `Shift+M+D`/`Shift+M+S` global hotkeys skip the dialog for quick toggle. Timed sleep, when enabled, keeps re-sleeping the display after each idle timeout for the rest of the session.
+>
+> After a long sleep, wake retries DDC knocks with longer waits. Keyboard, click, and the same user-mouse detection used to skip movement intervals all issue an active wake. Raw cursor drift without that user-mouse flag only checks whether the panel is already on (e.g. you power-cycled the monitor), so automated cursor movement cannot turn the display back on.
 
 **Modify Movement Settings** (`m` key or via Settings):
 - Interval timing and variance

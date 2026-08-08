@@ -9,9 +9,13 @@
 
 			$pKey = ($script:MouseAPI::GetAsyncKeyState(0x50) -band 0x8000) -ne 0
 			$qKey = ($script:MouseAPI::GetAsyncKeyState(0x51) -band 0x8000) -ne 0
+			$dKey = ($script:MouseAPI::GetAsyncKeyState(0x44) -band 0x8000) -ne 0
+			$sKey = ($script:MouseAPI::GetAsyncKeyState(0x53) -band 0x8000) -ne 0
 
 			if ($pKey) { $script:_HotkeyDebounce = $true; return 'togglePause' }
 			if ($qKey) { $script:_HotkeyDebounce = $true; return 'quit' }
+			if ($dKey) { $script:_HotkeyDebounce = $true; return 'toggleDisplaySleep' }
+			if ($sKey) { $script:_HotkeyDebounce = $true; return 'toggleDisplaySleep' }
 
 			return $null
 		}

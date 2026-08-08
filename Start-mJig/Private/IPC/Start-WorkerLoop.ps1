@@ -82,10 +82,17 @@
 	$lii = New-Object $script:LastInputType
 			$lii.cbSize = [uint32][System.Runtime.InteropServices.Marshal]::SizeOf($lii)
 			$_workerReadTask = $null
-			$_pendingWriteFlush = $null
-			$_workerSettingsEpoch = 0
-			$manualPause = $false
-			$script:_HotkeyDebounce = $false
+		$_pendingWriteFlush = $null
+		$_workerSettingsEpoch = 0
+		$manualPause = $false
+		$script:_HotkeyDebounce = $false
+		$_displaySleepMode = $false
+		$_dsAutoEnabled    = $script:DisplaySleepAutoEnabled
+		$_dsAutoTimeoutSecs = $script:DisplaySleepAutoTimeoutSecs
+		$_dsLastInputTime  = Get-Date
+		# Used later in the worker loop (idle clock / auto-sleep); touch for PSScriptAnalyzer
+		$null = $_dsAutoTimeoutSecs
+		$null = $_dsLastInputTime
 
 		# Viewer visual state — preserved across viewer sessions and sent in welcome message
 		$_viewerVisualState = @{
@@ -267,8 +274,9 @@
 						
 						# Check viewer disconnection
 					if ($viewerConnected -and -not $pipeServer.IsConnected) {
-						if ($_wDiag) { "$(Get-Date -Format 'HH:mm:ss.fff') - VIEWER DISCONNECTED (pipe not connected)" | Out-File $_wDiagFile -Append }
-						Show-Notification -Body "Terminal disconnected" -Action disconnected
+					if ($_wDiag) { "$(Get-Date -Format 'HH:mm:ss.fff') - VIEWER DISCONNECTED (pipe not connected)" | Out-File $_wDiagFile -Append }
+					Show-Notification -Body "Terminal disconnected" -Action disconnected
+					if ($_displaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $_displaySleepMode = $false }
 						$_workerReadTask = $null
 						$_pendingWriteFlush = $null
 						$viewerConnected = $false
@@ -351,21 +359,35 @@
 							$_viewerVisualState.activeSubDialog = if ($null -ne $msg.activeSubDialog -and $msg.activeSubDialog -ne '') { [string]$msg.activeSubDialog } else { $null }
 						}
 					}
-							'togglePause' {
-									if ($null -ne $msg.paused) {
-										$manualPause = [bool]$msg.paused
-									} else {
-										$manualPause = -not $manualPause
-									}
-									Update-TrayPauseLabel -Paused $manualPause
+						'togglePause' {
+								if ($null -ne $msg.paused) {
+									$manualPause = [bool]$msg.paused
+								} else {
+									$manualPause = -not $manualPause
 								}
-										'quit' {
-											if ($viewerConnected) {
-												try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'quit' } } catch {}
-											}
-											Show-Notification -Body "Stopped" -Action quit
-											return
+								Update-TrayPauseLabel -Paused $manualPause
+							}
+					'displaySleep' {
+						$_displaySleepMode = [bool]$msg.active
+						# Viewer wake/sleep ownership: keep idle clock fresh so headless auto-sleep re-arms correctly after disconnect
+						if (-not $_displaySleepMode) { $_dsLastInputTime = Get-Date }
+					}
+					'displaySleepSettings' {
+						$_dsAutoEnabled     = [bool]$msg.autoEnabled
+						$_dsAutoTimeoutSecs = [int]$msg.autoTimeoutSecs
+						$script:DisplaySleepAutoEnabled     = $_dsAutoEnabled
+						$script:DisplaySleepAutoTimeoutSecs = $_dsAutoTimeoutSecs
+						$script:DisplaySleepAudioEnabled    = [bool]$msg.audioEnabled
+						$_dsLastInputTime = Get-Date
+					}
+									'quit' {
+										if ($viewerConnected) {
+											try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'quit' } } catch {}
 										}
+										if ($_displaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $_displaySleepMode = $false }
+										Show-Notification -Body "Stopped" -Action quit
+										return
+									}
 									}
 									$msg = Read-PipeMessage -Reader $pipeReader -PendingTask ([ref]$_workerReadTask)
 								}
@@ -412,13 +434,32 @@
 								}
 							} catch {}
 						}
-						if ($_wGlobalAction -eq 'quit') {
-							try { Show-Notification -Body "Stopped" -Action quit } catch {}
-							if ($viewerConnected) {
-								try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'quit' } } catch {}
-							}
-							return
+					if ($_wGlobalAction -eq 'quit') {
+						try { Show-Notification -Body "Stopped" -Action quit } catch {}
+						if ($_displaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $_displaySleepMode = $false }
+						if ($viewerConnected) {
+							try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'quit' } } catch {}
 						}
+						return
+					}
+					if ($_wGlobalAction -eq 'toggleDisplaySleep') {
+						if (-not $_displaySleepMode) {
+							Start-Sleep -Milliseconds 500
+							$null = Invoke-DisplaySleep -Action Sleep
+							$_displaySleepMode = $true
+							if ($viewerConnected) {
+								try { $null = Send-PipeMessageNonBlocking -Writer $pipeWriter -Message @{ type = 'displaySleep'; active = $true } -PendingFlush ([ref]$_pendingWriteFlush) } catch {}
+							}
+						} else {
+							if (Invoke-DisplaySleep -Action Wake) {
+								$_displaySleepMode = $false
+								$_dsLastInputTime  = Get-Date
+								if ($viewerConnected) {
+									try { $null = Send-PipeMessageNonBlocking -Writer $pipeWriter -Message @{ type = 'displaySleep'; active = $false } -PendingFlush ([ref]$_pendingWriteFlush) } catch {}
+								}
+							}
+						}
+					}
 
 				# GetLastInputInfo idle check
 				try {
@@ -456,9 +497,33 @@
 							$workerLastPos = $currentCheckPos
 						}
 					}
-				} catch {}
-						
-						# Send state every 500ms (every 10th tick)
+			} catch {}
+
+		# Display sleep wake check: when no viewer is connected, the worker handles
+		# the DDC/CI wake call directly. When a viewer is connected, the viewer owns
+		# wake detection and will send { type = 'displaySleep'; active = $false } on
+		# success — calling Invoke-DisplaySleep here too would produce duplicate beeps.
+		if ($_displaySleepMode -and $userInputDetected -and -not $viewerConnected) {
+			if (Invoke-DisplaySleep -Action Wake) {
+				$_displaySleepMode = $false
+				$_dsLastInputTime  = Get-Date
+			}
+			# On $false: Invoke-DisplaySleep played retry beep; flag stays set
+		}
+
+		# Update auto-sleep last-input timestamp when real user input was detected
+		if ($userInputDetected) { $_dsLastInputTime = Get-Date }
+
+		# Recurring auto-sleep when no viewer is connected and idle timeout has elapsed
+		if ($_dsAutoEnabled -and -not $_displaySleepMode -and -not $viewerConnected) {
+			$_dsIdleSecs = ((Get-Date) - $_dsLastInputTime).TotalSeconds
+			if ($_dsIdleSecs -ge $_dsAutoTimeoutSecs) {
+				$null = Invoke-DisplaySleep -Action Sleep
+				$_displaySleepMode = $true
+			}
+		}
+
+				# Send state every 500ms (every 10th tick)
 						$workerStateTicks++
 						if ($viewerConnected -and ($workerStateTicks % 10) -eq 0) {
 							if ($userInputDetected -and -not $mouseInputDetected) {
@@ -513,9 +578,10 @@
 						statsAvgDurationMs        = $workerStatsAvgDurationMs
 						statsMinDurationMs        = $workerStatsMinDurationMs
 						statsMaxDurationMs        = $workerStatsMaxDurationMs
-						statsDirectionCounts      = $workerStatsDirectionCounts
-						statsLastCurveParams      = $workerStatsLastCurveParams
-					} -PendingFlush ([ref]$_pendingWriteFlush)
+					statsDirectionCounts      = $workerStatsDirectionCounts
+					statsLastCurveParams      = $workerStatsLastCurveParams
+					displaySleepMode          = $_displaySleepMode
+				} -PendingFlush ([ref]$_pendingWriteFlush)
 								if (-not $_sendResult) {
 									$_writeSkipCount++
 									if ($_wDiag) { "$(Get-Date -Format 'HH:mm:ss.fff') - WORKER STATE SKIPPED (flush pending) skipCount=$_writeSkipCount" | Out-File $_wDiagFile -Append }
@@ -603,13 +669,14 @@
 							}
 						}
 					}
-							'quit' {
-								try { Show-Notification -Body "Stopped" -Action quit } catch {}
-								if ($viewerConnected) {
-									try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'quit' } } catch {}
-								}
-								return
+						'quit' {
+							try { Show-Notification -Body "Stopped" -Action quit } catch {}
+							if ($_displaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $_displaySleepMode = $false }
+							if ($viewerConnected) {
+								try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'quit' } } catch {}
 							}
+							return
+						}
 						}
 					}
 
@@ -800,21 +867,23 @@
 				if ($null -eq $workerLastMovementTime) { $workerLastMovementTime = Get-Date }
 			}
 					
-				# End time check
-				if ($endTimeInt -ne -1 -and -not [string]::IsNullOrEmpty($end)) {
-					$currentDateTimeInt = [int]($date.ToString("MMddHHmm"))
-					$endDateTimeInt = [int]$end
-					if ($currentDateTimeInt -ge $endDateTimeInt) {
-						if ($viewerConnected) {
-							try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'endtime' } } catch {}
-						}
-						Show-Notification -Body "End time reached" -Action endtime
-						return
+			# End time check
+			if ($endTimeInt -ne -1 -and -not [string]::IsNullOrEmpty($end)) {
+				$currentDateTimeInt = [int]($date.ToString("MMddHHmm"))
+				$endDateTimeInt = [int]$end
+				if ($currentDateTimeInt -ge $endDateTimeInt) {
+					if ($viewerConnected) {
+						try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'endtime' } } catch {}
 					}
+					if ($_displaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $_displaySleepMode = $false }
+					Show-Notification -Body "End time reached" -Action endtime
+					return
 				}
+			}
 				}
-			} finally {
-				Remove-Notification
+		} finally {
+			if ($_displaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $_displaySleepMode = $false }
+			Remove-Notification
 				if ($null -ne $pipeReader) { try { $pipeReader.Dispose() } catch {} }
 				if ($null -ne $pipeWriter) { try { $pipeWriter.Dispose() } catch {} }
 				if ($null -ne $pipeServer) { try { $pipeServer.Dispose() } catch {} }

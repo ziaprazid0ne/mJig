@@ -33,10 +33,30 @@ Never use `= @()` or `+=` on `$LogArray`. No guard needed — render loop trims 
 ## Collection Allocation (Hot Path)
 
 Pre-allocated collections must be cleared/reused, never recreated:
+
 - `$intervalMouseInputs` (`HashSet[string]`) — use `.Clear()` and `$null = .Add(...)`, never `+=`
 - `$script:MenuItemsBounds` (`List[hashtable]`) — use `.Clear()` and `.Add()`
 - `$pressedMenuKeys` (hashtable) — use `.Clear()`
 - `$_waitPeekBuffer` (`INPUT_RECORD[]`) — reuse as-is
+
+## `[char]` Arithmetic Is Integer Arithmetic (CRITICAL)
+
+`[char] * int` gives an integer, not a string. `[char] + string` throws a type-conversion exception.
+Always coerce box chars to `[string]` before any string-building:
+
+```powershell
+# CORRECT
+$_bh  = "$($script:BoxHorizontal)"   # [string]
+$_bv  = "$($script:BoxVertical)"     # [string]
+$hline = $_bh * 36                   # string repetition ✓
+$row   = $_bv + $content + $_bv      # string concatenation ✓
+
+# WRONG — [char] arithmetic, returns int or throws
+$hline = $script:BoxHorizontal * 36          # int!
+$row   = $script:BoxVertical + $content      # exception if $content is non-numeric
+```
+
+This pattern is required in all dialog files whenever `$hline*` / row variables are built.
 
 ## Encoding (CRITICAL)
 
@@ -50,9 +70,11 @@ $char = "┌"           # RISKY — corrupts if encoding changes
 ## ReadKey Gotcha
 
 Never use `ReadKey("IncludeKeyDown")` alone — it blocks on KeyUp events. Always use:
+
 ```powershell
 $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown,IncludeKeyUp,AllowCtrlC")
 ```
+
 Filter KeyDown/KeyUp in code after the read.
 
 ## GetDate in Hot Path

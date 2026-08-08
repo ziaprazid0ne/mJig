@@ -11,8 +11,14 @@ alwaysApply: false
 - `Start-mJig` spawns a hidden background process (WMI) that performs cursor movement; the terminal becomes a viewer connected via named pipe
 - Pipe name is SHA256-derived hex (no 'mJig' string)
 - All pipe messages are AES-256-CBC encrypted (per-message random IV)
-- Worker sends: `welcome`, `state` (every 500ms), `log`, `stopped`, `togglePause`, `focus`
-- Viewer sends: `settings`, `endtime`, `output`, `title`, `viewerState`, `quit`
+- Worker sends: `welcome`, `state` (every 500ms), `log`, `stopped`, `togglePause`, `focus`, `displaySleep` (global-hotkey sleep toggle sync)
+- Viewer sends: `settings`, `endtime`, `output`, `title`, `viewerState`, `displaySleep`, `displaySleepSettings`, `quit`
+
+## Display Sleep IPC
+
+- `displaySleep` (`{ type='displaySleep'; active=$bool }`) — bidirectional. Viewer owns sleep/wake while connected; worker owns it when no viewer (and on global hotkey). Viewer also mirrors `displaySleepMode` from `state`.
+- `displaySleepSettings` (`{ type='displaySleepSettings'; audioEnabled=$bool; autoEnabled=$bool; autoTimeoutSecs=$int }`) — viewer → worker after Display Sleep dialog Apply/Sleep. Worker mirrors into `$script:DisplaySleepAuto*` / audio and restarts `$_dsLastInputTime` so recurring timed sleep continues after viewer disconnect.
+- **Recurring timed sleep is not one-shot**: while `autoEnabled` is true, after every successful wake the idle clock resets and another full `autoTimeoutSecs` of no real user input re-sleeps the display.
 
 ## Viewer Visual State Persistence
 

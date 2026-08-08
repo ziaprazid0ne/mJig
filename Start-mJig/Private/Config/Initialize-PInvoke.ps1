@@ -112,6 +112,8 @@ namespace mJiggAPI {
 		public const int VK_M     = 0x4D;
 		public const int VK_P     = 0x50;
 		public const int VK_Q     = 0x51;
+		public const int VK_D     = 0x44;
+		public const int VK_S     = 0x53;
 	}
 	
 	public class Mouse {
@@ -362,6 +364,43 @@ namespace mJiggAPI {
 		void Show([MarshalAs(UnmanagedType.IUnknown)] object notification);
 	}
 
+	[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+	public struct PHYSICAL_MONITOR {
+		public IntPtr hPhysicalMonitor;
+		[MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+		public string szPhysicalMonitorDescription;
+	}
+
+	public class DisplayControl {
+		[DllImport("dxva2.dll", SetLastError = true)]
+		public static extern bool GetNumberOfPhysicalMonitorsFromHMONITOR(
+			IntPtr hMonitor, out uint pdwNumberOfPhysicalMonitors);
+
+		[DllImport("dxva2.dll", SetLastError = true)]
+		public static extern bool GetPhysicalMonitorsFromHMONITOR(
+			IntPtr hMonitor, uint dwPhysicalMonitorArraySize,
+			[Out] PHYSICAL_MONITOR[] pPhysicalMonitorArray);
+
+		[DllImport("dxva2.dll", SetLastError = true)]
+		public static extern bool DestroyPhysicalMonitor(IntPtr hPhysicalMonitor);
+
+	[DllImport("dxva2.dll", SetLastError = true)]
+	public static extern bool SetVCPFeature(
+		IntPtr hMonitor, byte bVCPCode, uint dwNewValue);
+
+	[DllImport("dxva2.dll", SetLastError = true)]
+	public static extern bool GetVCPFeatureAndVCPFeatureReply(
+		IntPtr hMonitor, byte bVCPCode,
+		out uint pvct, out uint pdwCurrentValue, out uint pdwMaximumValue);
+
+		[DllImport("user32.dll")]
+		public static extern bool EnumDisplayMonitors(
+			IntPtr hdc, IntPtr lprcClip, EnumMonitorsDelegate lpfnEnum, IntPtr dwData);
+
+		public delegate bool EnumMonitorsDelegate(
+			IntPtr hMonitor, IntPtr hdcMonitor, IntPtr lprcMonitor, IntPtr dwData);
+	}
+
 	public static class Toast {
 		[DllImport("combase.dll")]
 		private static extern int WindowsCreateString(
@@ -487,6 +526,8 @@ namespace mJiggAPI {
 		$script:LastInputType = "$($script:_ApiNamespace).LASTINPUTINFO"
 		$script:InputRecordType = "$($script:_ApiNamespace).INPUT_RECORD"
 		$script:CSBIType      = "$($script:_ApiNamespace).CONSOLE_SCREEN_BUFFER_INFO"
+		$script:DisplayAPI          = "$($script:_ApiNamespace).DisplayControl" -as [type]
+		$script:PhysicalMonitorType = "$($script:_ApiNamespace).PHYSICAL_MONITOR"
 
 		if ($null -eq $script:MouseAPI -or $null -eq $script:KeyboardAPI) {
 			$errorMsg = "Failed to load required API types in namespace $($script:_ApiNamespace)"
@@ -497,5 +538,5 @@ namespace mJiggAPI {
 			throw $errorMsg
 		}
 		if ($DebugMode) {
-			Write-Host "  [OK] All types verified: Mouse, Keyboard, Toast (namespace: $($script:_ApiNamespace))" -ForegroundColor $script:TextSuccess
+			Write-Host "  [OK] All types verified: Mouse, Keyboard, Toast, DisplayControl (namespace: $($script:_ApiNamespace))" -ForegroundColor $script:TextSuccess
 		}

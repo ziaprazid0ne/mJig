@@ -6,7 +6,23 @@ All notable changes to `start-mjig.ps1` are documented in this file.
 
 ## [Latest] - Unreleased
 
-Changes since last commit (b18bdce - "Naming overhaul, Windows Terminal restore fix, cursor rules, notification cleanup"):
+Changes since last commit (7dfe910 - "Stats display, theme system, Apply/Cancel dialogs, Green hotkeys"):
+
+### Changed
+- **Display sleep uses VCP Standby (`0xD6=2`)** — was Off/DPM (`4`). Value `4` often drops the DDC I2C channel so software wake fails and a monitor power-cycle is required. Standby blanks the panel while keeping wake (`0xD6=1`) reachable.
+- **Default `-Output`** — `"full"` (was `"min"`).
+- **Display Sleep dialog docs** — AGENTS.md / README updated for audio cues, recurring `(t)imed sleep`, timeout field, Sleep/Apply/Cancel, and Standby sleep level.
+
+### Fixed
+- **Mouse wake via `$mouseInputDetected`** — display sleep now calls `Wake` on the same user-mouse flag that skips the movement interval (worker filters `recentAutoMove`; viewer OR-merges from IPC). Raw PrePos cursor drift without that flag still uses `Verify` only. Avoids the old `GetLastInputInfo`-based mouse Wake that false-triggered on simulated keys.
+- **Spontaneous display wake** — removed `GetLastInputInfo`-based mouse Wake and removed `SC_MONITORPOWER=2` pulse (Windows monitors-off + mJig keypress re-woke the panel).
+- **Recurring auto display sleep** — timed sleep is a continuous idle policy, not a one-shot timer. The idle clock (`$script:_DisplaySleepLastInputTime`) now updates in viewer mode (previously only inline), on every successful wake path, and when the display-sleep dialog commits settings.
+- **Worker auto-sleep after dialog settings** — `displaySleepSettings` now mirrors `autoEnabled` / `autoTimeoutSecs` into `$script:DisplaySleepAuto*` and restarts the worker idle clock.
+- **Viewer display-sleep sync** — viewer applies worker `displaySleep` messages and `displaySleepMode` from `state`.
+
+---
+
+## [7dfe910] - 2026-03-15
 
 ### Added
 - **Stats box content** — the previously empty middle rows of the stats panel (full view) now display five sections with graceful degradation: Session (running time, start time, moves/skipped/%, streak), Movement (last move dist/duration/elapsed, total/avg, range), Interruptions & Timing (KB/mouse interrupts, clean-streak best, actual vs. set interval, animation duration Avg/Min/Max), Direction Totals (px per N/NE/E/SE/S/SW/W/NW), and Settings Snapshot. On tall enough terminals a sixth section shows the Last Movement Curve — a rotated 2D ASCII path diagram inside an inner bordered box with two-row mathematical equations (`ease(t)` and `L(t)`).

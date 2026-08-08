@@ -3,7 +3,6 @@
 	<############################################################
 	## mJig - An overly complex powershell mouse jiggling tool ##
 	#############################################################
-	   '      \              /          \
 	  |       |Oo          o|            |
 	  `    \  |OOOo......oOO|   /        |
 	   `    \\OOOOOOOOOOOOOOO\//        /
@@ -38,7 +37,7 @@
 	param(
 		[Parameter(Mandatory = $false)] 
 		[ValidateSet("min", "full", "hidden")]
-		[string]$Output = "min",
+		[string]$Output = "full",
 		[Parameter(Mandatory = $false)]
 		[switch]$DebugMode,
 		[Parameter(Mandatory = $false)]
@@ -80,171 +79,8 @@
 	# ---- Module Runspace Provisioner ------------------------------------------------
 	# Runs Start-mJig in a fresh, isolated runspace — separate from the caller's session.
 	if (-not $_InModuleRunspace) {
-		$_modPath = Join-Path $PSScriptRoot 'Start-mJig.psm1'
-
-		# Save process-global console state (restored on exit)
-		$_savedTitle = try { $Host.UI.RawUI.WindowTitle } catch { $null }
-		$_k32Loaded = $false
-		try {
-			try { [void][_mJigProv._K32] } catch {
-				Add-Type -Name '_K32' -Namespace '_mJigProv' -ErrorAction Stop -MemberDefinition @'
-[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);
-[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);
-[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);
-'@
-			}
-			$_hIn  = [_mJigProv._K32]::GetStdHandle(-10)
-			$_hOut = [_mJigProv._K32]::GetStdHandle(-11)
-			$_savedInMode = [uint32]0; $_savedOutMode = [uint32]0
-			$null = [_mJigProv._K32]::GetConsoleMode($_hIn,  [ref]$_savedInMode)
-			$null = [_mJigProv._K32]::GetConsoleMode($_hOut, [ref]$_savedOutMode)
-			$_k32Loaded = $true
-		} catch { }
-
-		# Minimal InitialSessionState — no profiles, no snap-ins, no Format-Table overhead
-		$_iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault2()
-		$_iss.Formats.Clear()
-		$_iss.ThrowOnRunspaceOpenError = $true
-
-		$_rs  = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($Host, $_iss)
-		$_rs.ApartmentState = [System.Threading.ApartmentState]::STA
-		$_rs.Open()
-		$_ps = [System.Management.Automation.PowerShell]::Create()
-		$_ps.Runspace = $_rs
-
-		if ($DebugMode) {
-			$_parentRsId = if ([System.Management.Automation.Runspaces.Runspace]::DefaultRunspace) {
-				[System.Management.Automation.Runspaces.Runspace]::DefaultRunspace.Id } else { '(none)' }
-			Write-Host "[RUNSPACE] Provisioner: launching isolated child" -ForegroundColor Cyan
-			Write-Host "  Parent Runspace  : ID $_parentRsId"  -ForegroundColor Gray
-			Write-Host "  Child  Runspace  : ID $($_rs.Id)"    -ForegroundColor Gray
-			Write-Host "  Thread           : $([System.Threading.Thread]::CurrentThread.ManagedThreadId)" -ForegroundColor Gray
-			Write-Host "  ApartmentState   : $($_rs.ApartmentState)" -ForegroundColor Gray
-			Write-Host "  ISS base         : CreateDefault2 (Core + Utility + Management)" -ForegroundColor Gray
-			Write-Host "  ISS Formats      : $($_iss.Formats.Count) (cleared)" -ForegroundColor Gray
-			Write-Host "  Console IN mode  : 0x$($_savedInMode.ToString('X4'))  $(if ($_k32Loaded) {'(saved)'} else {'(save failed)'})" -ForegroundColor Gray
-			Write-Host "  Console OUT mode : 0x$($_savedOutMode.ToString('X4'))  $(if ($_k32Loaded) {'(saved)'} else {'(save failed)'})" -ForegroundColor Gray
-			Write-Host "  Window title     : $_savedTitle (saved)" -ForegroundColor Gray
-			Write-Host ""
-		}
-
-		# Instant terminal-close handler — fires on CTRL_CLOSE_EVENT before PS grace period
-		try { [void][_mJigCloseHandlerX] } catch {
-			Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public class _mJigCloseHandlerX {
-    public delegate bool HandlerDelegate(uint ctrlType);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetConsoleCtrlHandler(HandlerDelegate h, bool add);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool TerminateProcess(IntPtr hProcess, uint exitCode);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr GetCurrentProcess();
-    private static HandlerDelegate _delegate;
-    public static void Register() {
-        _delegate = new HandlerDelegate(OnClose);
-        SetConsoleCtrlHandler(_delegate, true);
-    }
-    public static void Unregister() {
-        if (_delegate != null) { SetConsoleCtrlHandler(_delegate, false); _delegate = null; }
-    }
-    private static bool OnClose(uint t) {
-        if (t == 2 || t == 5 || t == 6) { TerminateProcess(GetCurrentProcess(), 0); }
-        return false;
-    }
-}
-'@ -ErrorAction SilentlyContinue
-		}
-		$_closeHandlerRegistered = $false
-		try { [_mJigCloseHandlerX]::Register(); $_closeHandlerRegistered = $true } catch {}
-
-		try {
-			$null = $_ps.AddScript("Import-Module '$_modPath'")
-			$null = $_ps.AddStatement().AddCommand('Start-mJig')
-			$null = $_ps.AddParameter('_InModuleRunspace', $true)
-			foreach ($_kvp in $PSBoundParameters.GetEnumerator()) {
-				$null = $_ps.AddParameter($_kvp.Key, $_kvp.Value)
-			}
-			# BeginInvoke + poll — keeps outer thread interruptible for instant close
-			$_asyncResult = $_ps.BeginInvoke()
-			while (-not $_asyncResult.IsCompleted) {
-				Start-Sleep -Milliseconds 50
-			}
-			try { $null = $_ps.EndInvoke($_asyncResult) } catch {}
-			if ($_ps.HadErrors -and $DebugMode) {
-				$_errStream = $_ps.Streams.Error
-				if ($_errStream.Count -gt 0) {
-					$_uniqueErrors = @{}
-					foreach ($_err in $_errStream) {
-						$_key = "$($_err.Exception.Message)|$($_err.InvocationInfo.ScriptLineNumber)"
-						if (-not $_uniqueErrors.ContainsKey($_key)) {
-							$_uniqueErrors[$_key] = @{ Error = $_err; Count = 1 }
-						} else {
-							$_uniqueErrors[$_key].Count++
-						}
-					}
-					Write-Host ""
-					Write-Host "[RUNSPACE] $($_errStream.Count) non-terminating error(s) in child ($($_uniqueErrors.Count) unique):" -ForegroundColor DarkYellow
-					foreach ($_entry in $_uniqueErrors.Values) {
-						$_e = $_entry.Error
-						$_c = $_entry.Count
-						$_line = if ($_e.InvocationInfo) { $_e.InvocationInfo.ScriptLineNumber } else { '?' }
-						Write-Host "  Line $_line (x$_c): $($_e.Exception.Message)" -ForegroundColor DarkYellow
-					}
-				}
-			}
-		} finally {
-			if ($_closeHandlerRegistered) { try { [_mJigCloseHandlerX]::Unregister() } catch {} }
-			# Stop + EndInvoke: waits for BatchInvocationWorkItem thread to fully exit
-			if ($null -ne $_asyncResult -and -not $_asyncResult.IsCompleted) {
-				try { $null = $_ps.Stop() } catch {}
-			}
-			if ($null -ne $_asyncResult) {
-				try { $null = $_ps.EndInvoke($_asyncResult) } catch {}
-			}
-			$_ps.Dispose()
-			$_rs.Close()
-			$_rs.Dispose()
-
-			# Restore process-global console state (VT100, mode flags, title)
-			try { [Console]::Write("$([char]27)[?25h$([char]27)[?7h$([char]27)[0m") } catch {}
-			if ($_k32Loaded) {
-				try { $null = [_mJigProv._K32]::SetConsoleMode($_hIn,  $_savedInMode)  } catch {}
-				try { $null = [_mJigProv._K32]::SetConsoleMode($_hOut, $_savedOutMode) } catch {}
-			}
-			if ($null -ne $_savedTitle) {
-				try { $Host.UI.RawUI.WindowTitle = $_savedTitle } catch {}
-			}
-			# In debug mode, pause before clearing so any errors or init output can be read.
-			if ($DebugMode) {
-				Write-Host ""
-				Write-Host "Press any key to exit..." -ForegroundColor Yellow
-				try {
-					$Host.UI.RawUI.FlushInputBuffer()
-					while ($true) {
-						Start-Sleep -Milliseconds 50
-						if ($Host.UI.RawUI.KeyAvailable) {
-							try { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown,IncludeKeyUp,AllowCtrlC") } catch {}
-							break
-						}
-					}
-				} catch {}
-			}
-			try { [Console]::Clear() } catch {}
-			if ($DebugMode) {
-				Write-Host ""
-				Write-Host "[RUNSPACE] Child exited - console state restored" -ForegroundColor Cyan
-				if ($_k32Loaded) {
-					$_finalIn = [uint32]0; $_finalOut = [uint32]0
-					$null = [_mJigProv._K32]::GetConsoleMode($_hIn,  [ref]$_finalIn)
-					$null = [_mJigProv._K32]::GetConsoleMode($_hOut, [ref]$_finalOut)
-					Write-Host "  Console IN mode  : 0x$($_finalIn.ToString('X4'))"  -ForegroundColor Gray
-					Write-Host "  Console OUT mode : 0x$($_finalOut.ToString('X4'))" -ForegroundColor Gray
-				}
-				Write-Host "  Window title     : $($Host.UI.RawUI.WindowTitle)" -ForegroundColor Gray
-			}
-		}
+		. "$PSScriptRoot\Private\Config\Invoke-ModuleRunspaceProvisioner.ps1"
+		Invoke-ModuleRunspaceProvisioner -ModuleRoot $PSScriptRoot -BoundParameters $PSBoundParameters -DebugMode:$DebugMode
 		return
 	}
 	# ---- End Module Runspace Provisioner --------------------------------------------
@@ -259,172 +95,29 @@ public class _mJigCloseHandlerX {
 	}
 
 	# ---- Suppress PowerShell Logging ------------------------------------------------
-	# Disable Group Policy logging cache (reflection) and stop any active transcript
-	try {
-		$groupPolicySettingsField = [ref].Assembly.GetType('System.Management.Automation.Utils').GetField(
-			'cachedGroupPolicySettings', 'NonPublic,Static')
-		if ($groupPolicySettingsField) {
-			$groupPolicySettings = $groupPolicySettingsField.GetValue($null)
-			if ($groupPolicySettings) {
-				foreach ($key in @('ScriptBlockLogging', 'ModuleLogging', 'Transcription')) {
-					if ($groupPolicySettings.ContainsKey($key)) {
-						foreach ($prop in @($groupPolicySettings[$key].Keys)) {
-							$groupPolicySettings[$key][$prop] = if ($prop -eq 'OutputDirectory') { '' } else { 0 }
-						}
-					}
-				}
-				if ($script:DebugMode) { Add-DebugLogEntry "GP logging cache neutralized" }
-			}
-		}
-	} catch {}
-
-	# Stop active transcript
-	try {
-		$transcriptOutput = Stop-Transcript *>&1 | Out-String
-		if ($transcriptOutput -match 'output file is\s+(.+?)(\r?\n|$)') {
-			$transcriptPath = $Matches[1].Trim()
-			if (Test-Path $transcriptPath) {
-				Remove-Item $transcriptPath -Force -ErrorAction SilentlyContinue
-			}
-		}
-	} catch {}
+	. "$PSScriptRoot\Private\Helpers\Disable-PowerShellLogging.ps1"
 	# ---- End Suppress PowerShell Logging -------------------------------------------
 
-	############
-	## Preparing ##
-	############ 
-
-	# Copy parameters to script-scoped variables so they can be modified at runtime
-	$script:IntervalSeconds = $IntervalSeconds
-	$script:IntervalVariance = $IntervalVariance
-	$script:MoveSpeed = $MoveSpeed
-	$script:MoveVariance = $MoveVariance
-	$script:TravelDistance = $TravelDistance
-	$script:TravelVariance = $TravelVariance
-	$script:AutoResumeDelaySeconds = $AutoResumeDelaySeconds
-	$script:EndVariance = $EndVariance
-	$script:Output = $Output
-	$script:DebugMode = [bool]$DebugMode
-
-	# Derive stealth session identifier for pipe/mutex/encryption names
-	. "$PSScriptRoot\Private\Helpers\Get-SessionIdentifier.ps1"
-	$script:SessionId = Get-SessionIdentifier
-	$script:PipeEncryptionKey = $script:SessionId.AesKey
-	$script:PipeAuthToken = $script:SessionId.AuthToken
-	if ($_PipeName -eq 'mJig_IPC') {
-		$script:PipeName = $script:SessionId.PipeName
-	} else {
-		$script:PipeName = $_PipeName
-	}
-	if ($_WorkerMode -and $script:_wsDiagFile) {
-		"$(Get-Date -Format 'HH:mm:ss.fff') [2] Session derived  PipeName=$($script:PipeName)  KeyLen=$($script:PipeEncryptionKey.Length)  TokenLen=$($script:PipeAuthToken.Length)" | Out-File $script:_wsDiagFile -Append
-	}
-
-	# Initialize Variables
+	# Initialize local working variables
 	$LastPos = $null
 	$OldBufferSize = $null
 	$OldWindowSize = $null
 	$Rows = 0
 	$SkipUpdate = $false
-	$script:PendingForceRedraw = $false
-	$script:CurrentScreenState = "startup"
-	$PreviousView = $null  # Store the view before hiding to restore it later
+	$PreviousView = $null
 	$PosUpdate = $false
 	$LogArray = New-Object 'System.Collections.Generic.List[object]'
 	$HostWidth = 0
 	$HostHeight = 0
 	$LastMovementTime = $null
-	$LastMovementDurationMs = 0  # Track duration of last movement in milliseconds
-	$LastSimulatedKeyPress = $null  # Track when we last sent a simulated key press
-	$LastAutomatedMouseMovement = $null  # Track when we last performed automated mouse movement
-	$LastUserInputTime = $null  # Track when user input was last detected (for auto-resume delay timer)
+	$LastMovementDurationMs = 0
+	$LastSimulatedKeyPress = $null
+	$LastAutomatedMouseMovement = $null
+	$LastUserInputTime = $null
 
-	# Stats tracking — cumulative counters updated every move/skip cycle
-	$script:StatsMoveCount             = 0
-	$script:StatsSkipCount             = 0
-	$script:StatsCurrentStreak         = 0
-	$script:StatsLongestStreak         = 0
-	$script:StatsTotalDistancePx       = 0.0
-	$script:StatsLastMoveDist          = 0.0
-	$script:StatsMinMoveDist           = [double]::MaxValue
-	$script:StatsMaxMoveDist           = 0.0
-	$script:StatsKbInterruptCount      = 0
-	$script:StatsMsInterruptCount      = 0
-	$script:StatsLongestCleanStreak    = 0
-	$script:StatsCleanStreak           = 0
-	$script:StatsAvgActualIntervalSecs = 0.0
-	$script:StatsLastMoveTick          = $null
-	$script:StatsAvgDurationMs         = 0.0
-	$script:StatsMinDurationMs         = [int]::MaxValue
-	$script:StatsMaxDurationMs         = 0
-	$script:StatsDirectionCounts       = @{ N = 0.0; NE = 0.0; E = 0.0; SE = 0.0; S = 0.0; SW = 0.0; W = 0.0; NW = 0.0 }
-	$script:StatsLastCurveParams       = $null
-
-	# Curve animation — pending flag set whenever new curve params arrive; cleared by animation loop
-	$script:StatsCurveAnimPending  = $false
-	$script:_LastCurveParamKey     = ""
-
-	$script:PreviousIntervalKeys = @()
-	$script:ResizeThrottleMs = 100
-	$script:LoopIteration = 0  # Track loop iterations for diagnostics
-	$script:LastInputCheckTime = $null  # Track when we last logged input check (for debug mode)
-	$script:DialogButtonClick = $null  # Track dialog button clicks detected from main loop ("Update" or "Cancel")
-	$script:ManualPause = $false
-	$script:_HotkeyDebounce = $false
-	
-	# Performance: Cache for reflection method lookups
-	$script:MethodCache = @{}
-	
-	# Note: Screen bounds are cached later after System.Windows.Forms is loaded
-	$script:ScreenWidth = $null
-	$script:ScreenHeight = $null
-	$script:DialogButtonBounds = $null  # Store dialog button bounds when dialog is open {buttonRowY, updateStartX, updateEndX, cancelStartX, cancelEndX}
-	$script:LastClickLogTime = $null  # Track when we last logged a click to prevent duplicate logs
-	$script:TitlePresets = @(
-		@{ Name = "mJig";                 Emoji = 0x1F400 }
-		@{ Name = "Windows Update";       Emoji = 0x1F504 }
-		@{ Name = "System Health Check";  Emoji = 0x1FA7A }
-		@{ Name = "Background Services";  Emoji = 0x2699  }
-		@{ Name = "Windows Defender Scan"; Emoji = 0x1F6E1 }
-		@{ Name = "Performance Monitor";  Emoji = 0x1F4CA }
-	)
-	$script:TitlePresetIndex = 0
-	$script:NotificationsEnabled = $true
-	if ($Title.Length -gt 0) {
-		$script:WindowTitle = $Title
-		$script:TitleEmoji  = 0x1F400
-		if ($script:TitlePresets[0].Name -ne $Title) {
-			$script:TitlePresets = @(@{ Name = $Title; Emoji = 0x1F400 }) + $script:TitlePresets
-		}
-	} else {
-		$script:WindowTitle = "mJig"
-		$script:TitleEmoji  = 0x1F400
-	}
-	$script:MenuClickHotkey = $null  # Menu item hotkey triggered by mouse click
-	$script:ModeButtonBounds           = $null  # Header pause/resume button click bounds {y, startX, endX}
-	$script:ModeLabelBounds            = $null  # Header "Full"/"Min" label click bounds {y, startX, endX}
-	$script:HeaderEndTimeBounds        = $null  # Header "End(hourglass)/..." hidden click region {y, startX, endX}
-	$script:HeaderCurrentTimeBounds    = $null  # Header "Current(hourglass)/..." hidden click region {y, startX, endX}
-	$script:HeaderLogoBounds           = $null  # Header "mJig(mouse)" logo click region {y, startX, endX}
-	$script:Version                    = "1.0.0"  # Current application version
-	$script:VersionCheckCache          = $null  # Cached result of GitHub release check {latest, url, isNewer, error}
-	$script:PressedMenuButton  = $null   # hotkey of the menu button currently held down (LMB pressed, not yet released)
-	$script:ButtonClickedAt   = $null   # timestamp of confirmed click (LMB UP over button); used to time color restoration
-	$script:PendingDialogCheck = $false  # set on confirmed click; render loop uses it to decide whether to clear pressed state
-	$script:LButtonWasDown    = $false   # tracks previous LMB state from console events for UP-transition detection
-	$script:RenderQueue = New-Object 'System.Collections.Generic.List[object[]]'
-	$script:FrameBuilder = New-Object System.Text.StringBuilder (8192)
-	$script:MenuItemsBounds = New-Object 'System.Collections.Generic.List[hashtable]'
-	
-	# Box-drawing characters (using Unicode code points to avoid encoding issues)
-	$script:BoxTopLeft = [char]0x250C      # top-left corner
-	$script:BoxTopRight = [char]0x2510     # top-right corner
-	$script:BoxBottomLeft = [char]0x2514   # bottom-left corner
-	$script:BoxBottomRight = [char]0x2518  # bottom-right corner
-	$script:BoxHorizontal = [char]0x2500   # horizontal line
-	$script:BoxVertical = [char]0x2502     # vertical line
-	$script:BoxVerticalRight = [char]0x251C # vertical + right tee
-	$script:BoxVerticalLeft = [char]0x2524  # vertical + left tee
+	# Session identifier derivation + all script-scoped variable initialization
+	. "$PSScriptRoot\Private\Helpers\Get-SessionIdentifier.ps1"
+	. "$PSScriptRoot\Private\Config\Initialize-Variables.ps1"
 	
 	. "$PSScriptRoot\Private\Config\Initialize-Theme.ps1"
 	. "$PSScriptRoot\Private\Config\Set-ThemeProfile.ps1"
@@ -442,208 +135,7 @@ public class _mJigCloseHandlerX {
 	# Blocks until window stable and LMB released; returns final stable Size object
 	. "$PSScriptRoot\Private\Helpers\Invoke-ResizeHandler.ps1"
 
-	# Prep the Host Console
-	try {
-		$Host.UI.RawUI.WindowTitle = if ($DebugMode) { "$script:WindowTitle - Debug Mode" } else { $script:WindowTitle }
-		if ($DebugMode) {
-			Write-Host "[DEBUG] Set window title: $($Host.UI.RawUI.WindowTitle)" -ForegroundColor $script:TextHighlight
-		}
-	} catch {
-		if ($DebugMode) {
-			Write-Host "  [WARN] Failed to set window title: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
-		}
-	}
-
-	# Duplicate instance detection via named mutex
-	if ($DebugMode) {
-		Write-Host "[DEBUG] Checking for duplicate mJig instances (mutex)..." -ForegroundColor $script:TextHighlight
-	}
-	$script:InstanceMutex = $null
-	$mutexAcquired = $false
-	try {
-		$script:InstanceMutex = New-Object System.Threading.Mutex($false, "Global\$($script:SessionId.PipeName)")
-		$mutexAcquired = $script:InstanceMutex.WaitOne(0)
-	} catch [System.Threading.AbandonedMutexException] {
-		$mutexAcquired = $true
-	} catch {
-		if ($DebugMode) {
-			Write-Host "  [WARN] Mutex check failed: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
-		}
-	}
-	$_viewerReconnect = $false
-	if (-not $mutexAcquired -and -not $_WorkerMode) {
-		# Mutex already held — connect as viewer after initialization
-		if ($null -ne $script:InstanceMutex) { $script:InstanceMutex.Dispose() }
-		$_viewerReconnect = $true
-	}
-	if ($DebugMode -and -not $_viewerReconnect) {
-		Write-Host "  [OK] Mutex acquired — no other instance running" -ForegroundColor $script:TextSuccess
-	}
-	if ($_WorkerMode -and $script:_wsDiagFile) {
-		"$(Get-Date -Format 'HH:mm:ss.fff') [3] Mutex check  acquired=$mutexAcquired  viewerReconnect=$_viewerReconnect" | Out-File $script:_wsDiagFile -Append
-	}
-	
-	# Worker mode skips console rendering setup (headless)
-	if (-not $_WorkerMode) {
-	if (-not $_viewerReconnect -and $Output -ne "hidden") {
-		if (-not $DebugMode) {
-			Show-StartupScreen
-		} else {
-			try { Clear-Host } catch {}
-		}
-	}
-	
-	if ($DebugMode) {
-		Write-Host "Initialization Debug" -ForegroundColor $script:HeaderAppName
-		Write-Host ""
-		$_childRsId = if ([System.Management.Automation.Runspaces.Runspace]::DefaultRunspace) {
-			[System.Management.Automation.Runspaces.Runspace]::DefaultRunspace.Id } else { '(unknown)' }
-		Write-Host "[RUNSPACE] Confirmed: running inside isolated runspace" -ForegroundColor Cyan
-		Write-Host "  Runspace ID : $_childRsId"  -ForegroundColor Gray
-		Write-Host "  Thread ID   : $([System.Threading.Thread]::CurrentThread.ManagedThreadId)" -ForegroundColor Gray
-		Write-Host "  Modules     : $((Get-Module | ForEach-Object { $_.Name }) -join ', ')" -ForegroundColor Gray
-		Write-Host ""
-		Write-Host "[DEBUG] Initializing console..." -ForegroundColor $script:TextHighlight
-		Write-Host "[DEBUG] Window title: $($Host.UI.RawUI.WindowTitle)" -ForegroundColor $script:TextHighlight
-		Write-Host "[DEBUG] DebugMode is ENABLED - click detection will be logged" -ForegroundColor $script:TextWarning
-		Write-Host ""
-	}
-	try {
-		$signature = @'
-[DllImport("kernel32.dll", SetLastError = true)]
-public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
-[DllImport("kernel32.dll", SetLastError = true)]
-public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
-[DllImport("kernel32.dll", SetLastError = true)]
-public static extern IntPtr GetStdHandle(int nStdHandle);
-'@
-		$type = Add-Type -MemberDefinition $signature -Name Win32Utils -Namespace Console -PassThru -ErrorAction SilentlyContinue
-		if ($type) {
-			$STD_INPUT_HANDLE = -10
-			$hConsole = $type::GetStdHandle($STD_INPUT_HANDLE)
-			$mode = 0
-			if ($type::GetConsoleMode($hConsole, [ref]$mode)) {
-				$ENABLE_QUICK_EDIT_MODE = 0x0040
-				$ENABLE_MOUSE_INPUT = 0x0010
-				$newMode = ($mode -band (-bnot $ENABLE_QUICK_EDIT_MODE)) -bor $ENABLE_MOUSE_INPUT
-				if ($type::SetConsoleMode($hConsole, $newMode)) {
-					if ($DebugMode) {
-						Write-Host "  [OK] Quick Edit Mode disabled, Mouse Input enabled" -ForegroundColor $script:TextSuccess
-					}
-				} else {
-					if ($DebugMode) {
-						Write-Host "  [WARN] Failed to set console mode (SetConsoleMode failed)" -ForegroundColor $script:TextWarning
-					}
-				}
-			} else {
-				if ($DebugMode) {
-					Write-Host "  [WARN] Failed to disable Quick Edit Mode (GetConsoleMode failed)" -ForegroundColor $script:TextWarning
-				}
-			}
-		} else {
-			if ($DebugMode) {
-				Write-Host "  [WARN] Failed to disable Quick Edit Mode (could not load Win32 API)" -ForegroundColor $script:TextWarning
-			}
-		}
-	} catch {
-		if ($DebugMode) {
-			Write-Host "  [WARN] Failed to disable Quick Edit Mode: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
-		}
-	}
-	
-	# Enable VT100 processing on stdout for ANSI escape sequence rendering
-	try {
-		if ($type) {
-			$STD_OUTPUT_HANDLE = -11
-			$hStdOut = $type::GetStdHandle($STD_OUTPUT_HANDLE)
-			$outMode = 0
-			if ($type::GetConsoleMode($hStdOut, [ref]$outMode)) {
-				$ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-				$newOutMode = $outMode -bor $ENABLE_VIRTUAL_TERMINAL_PROCESSING
-				if ($type::SetConsoleMode($hStdOut, $newOutMode)) {
-					if ($DebugMode) {
-						Write-Host "  [OK] VT100 processing enabled on stdout" -ForegroundColor $script:TextSuccess
-					}
-				} else {
-					if ($DebugMode) {
-						Write-Host "  [WARN] Failed to enable VT100 processing" -ForegroundColor $script:TextWarning
-					}
-				}
-			}
-		}
-		[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-		if ($DebugMode) {
-			Write-Host "  [OK] Console output encoding set to UTF-8" -ForegroundColor $script:TextSuccess
-		}
-	} catch {
-		if ($DebugMode) {
-			Write-Host "  [WARN] VT100/UTF-8 setup: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
-		}
-	}
-	
-	try {
-		[Console]::Write("$([char]27)[?25l")
-		$script:CursorVisible = $false
-		if ($DebugMode) {
-			Write-Host "  [OK] Console cursor hidden" -ForegroundColor $script:TextSuccess
-		}
-	} catch {
-		if ($DebugMode) {
-			Write-Host "  [FAIL] Failed to hide cursor: $($_.Exception.Message)" -ForegroundColor $script:TextError
-		}
-	}
-	
-	# Capture Initial Buffer & Window Sizes (needed even for hidden mode)
-	if ($DebugMode) {
-		Write-Host "[DEBUG] Capturing console dimensions..." -ForegroundColor $script:TextHighlight
-	}
-	try {
-		$pshost = Get-Host
-		$pswindow = $pshost.UI.RawUI
-		$newWindowSize = $pswindow.WindowSize
-		$newBufferSize = $pswindow.BufferSize
-		if ($DebugMode) {
-			Write-Host "  [OK] Got console dimensions" -ForegroundColor $script:TextSuccess
-			Write-Host "    Window Size: $($newWindowSize.Width)x$($newWindowSize.Height)" -ForegroundColor Gray
-			Write-Host "    Buffer Size: $($newBufferSize.Width)x$($newBufferSize.Height)" -ForegroundColor Gray
-		}
-	} catch {
-		if ($DebugMode) {
-			Write-Host "  [FAIL] Failed to get console dimensions: $($_.Exception.Message)" -ForegroundColor $script:TextError
-		}
-		throw  # Re-throw as this is critical
-	}
-	# Match buffer height to window height (horizontal buffer managed by PowerShell)
-	try {
-		$pswindow.BufferSize = New-Object System.Management.Automation.Host.Size($newBufferSize.Width, $newWindowSize.Height)
-		$newBufferSize = $pswindow.BufferSize
-		if ($DebugMode) {
-			Write-Host "  [OK] Set buffer height to match window height" -ForegroundColor $script:TextSuccess
-		}
-	} catch {
-		if ($DebugMode) {
-			Write-Host "  [WARN] Failed to set buffer size: $($_.Exception.Message)" -ForegroundColor $script:TextWarning
-			Write-Host "    Continuing with current buffer size" -ForegroundColor Gray
-		}
-		$newBufferSize = $pswindow.BufferSize
-	}
-	$OldBufferSize = $newBufferSize
-	$OldWindowSize = $newWindowSize
-	$HostWidth = $newWindowSize.Width
-	$HostHeight = $newWindowSize.Height
-	if ($DebugMode) {
-		Write-Host "    Final host dimensions: ${HostWidth}x${HostHeight}" -ForegroundColor Gray
-	}
-
-	# Initialize the Output Array
-	if ($DebugMode) {
-		Write-Host "[DEBUG] Initializing output array..." -ForegroundColor $script:TextHighlight
-	}
-	if ($DebugMode) {
-		Write-Host "  [OK] Output mode: $Output" -ForegroundColor $script:TextSuccess
-	}
-
-	} # end if (-not $_WorkerMode) — console setup guard
+	. "$PSScriptRoot\Private\Config\Initialize-Console.ps1"
 	
 	###############################
 	## Calculating the End Times ##
@@ -653,100 +145,14 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 		Write-Host "[DEBUG] Calculating end times..." -ForegroundColor $script:TextHighlight
 	}
 	
-	# Convert EndTime to string and parse
-	# Handle: "0" = none, "00" or "0000" = midnight (0000), 2-digit = hour on the hour, 4-digit = HHmm
-	try {
-		$endTimeTrimmed = $EndTime.Trim()
-		
-		# Check if it is "0" (single digit) - means no end time
-		if ($endTimeTrimmed -eq "0") {
-			$endTimeInt = -1
-			$endTimeStr = ""
-			if ($DebugMode) {
-				Write-Host "  [OK] No end time specified - script will run indefinitely" -ForegroundColor $script:TextSuccess
-			}
-		} elseif ($endTimeTrimmed.Length -eq 2) {
-			# 2-digit input = hour on the hour (e.g., "12" = 1200, "00" = 0000)
-			$hours = [int]$endTimeTrimmed
-			if ($hours -ge 0 -and $hours -le 23) {
-				$endTimeInt = $hours * 100  # Convert to HHmm format (e.g., 12 -> 1200)
-				$endTimeStr = $endTimeInt.ToString().PadLeft(4, '0')
-				if ($DebugMode) {
-					Write-Host "  [OK] Parsed end time: $endTimeStr (hour on the hour)" -ForegroundColor $script:TextSuccess
-				}
-			} else {
-				Write-Host "Error: Invalid hour format. Hours must be 00-23. Got: $EndTime" -ForegroundColor $script:TextError
-				throw "Invalid hour format: $EndTime"
-			}
-		} elseif ($endTimeTrimmed.Length -eq 4) {
-			# 4-digit input = HHmm format
-			$endTimeInt = [int]$endTimeTrimmed
-			$hours = [int]$endTimeTrimmed.Substring(0, 2)
-			$minutes = [int]$endTimeTrimmed.Substring(2, 2)
-			
-			# Validate HHmm format
-			if ($hours -ge 0 -and $hours -le 23 -and $minutes -ge 0 -and $minutes -le 59) {
-				$endTimeStr = $endTimeTrimmed
-				if ($DebugMode) {
-					Write-Host "  [OK] Parsed end time: $endTimeStr" -ForegroundColor $script:TextSuccess
-				}
-			} else {
-				if ($hours -gt 23) {
-					Write-Host "Error: Invalid time format. Hours must be 00-23. Got: $EndTime" -ForegroundColor $script:TextError
-				} elseif ($minutes -gt 59) {
-					Write-Host "Error: Invalid time format. Minutes must be 00-59. Got: $EndTime" -ForegroundColor $script:TextError
-				} else {
-					Write-Host "Error: Invalid time format. Expected HHmm format (0000-2359). Got: $EndTime" -ForegroundColor $script:TextError
-				}
-				throw "Invalid time format: $EndTime"
-			}
-		} else {
-			Write-Host "Error: Invalid time format. Expected '0' (none), 2-digit hour (00-23), or 4-digit HHmm (0000-2359). Got: $EndTime" -ForegroundColor $script:TextError
-			throw "Invalid time format: $EndTime"
-		}
-	} catch {
-		if ($DebugMode) {
-			Write-Host "  [FAIL] Failed to parse endTime: $($_.Exception.Message)" -ForegroundColor $script:TextError
-		}
-		if ($_.Exception.Message -notmatch "Invalid time format") {
-			Write-Host "Error: Invalid EndTime format: $EndTime" -ForegroundColor $script:TextError
-		}
-		throw
+	# Diagnostics folder/file initialization (sets $script:DiagEnabled + all diag paths)
+	$_diagRoot = $PSScriptRoot
+	$null = $_diagRoot  # consumed by Initialize-Diagnostics.ps1 via dot-source scope chain
+	. "$PSScriptRoot\Private\Config\Initialize-Diagnostics.ps1"
+
+	if ($_WorkerMode -and $script:_wsDiagFile) {
+		"$(Get-Date -Format 'HH:mm:ss.fff') [4a] About to dot-source Initialize-PInvoke.ps1" | Out-File $script:_wsDiagFile -Append
 	}
-	
-	# Time format has already been validated in the try-catch block above
-	# Proceed with initialization
-		# Diagnostics - initialize folder and file paths
-		$script:DiagEnabled = $Diag
-		if ($script:DiagEnabled) {
-			$script:DiagFolder = Join-Path $PSScriptRoot "_diag"
-			if (-not (Test-Path $script:DiagFolder)) {
-				New-Item -ItemType Directory -Path $script:DiagFolder -Force | Out-Null
-			}
-			$script:StartupDiagFile = Join-Path $script:DiagFolder "startup.txt"
-			$script:SettleDiagFile = Join-Path $script:DiagFolder "settle.txt"
-			$script:InputDiagFile = Join-Path $script:DiagFolder "input.txt"
-			
-			$diagTimestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-			$diagRsId = if ([System.Management.Automation.Runspaces.Runspace]::DefaultRunspace) {
-				[System.Management.Automation.Runspaces.Runspace]::DefaultRunspace.Id } else { '(unknown)' }
-			"=== mJig Startup Diag: $diagTimestamp ===" | Out-File $script:StartupDiagFile
-			"$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 1: Starting initialization" | Out-File $script:StartupDiagFile -Append
-			"  Diag enabled, folder: $script:DiagFolder" | Out-File $script:StartupDiagFile -Append
-			"  Runspace ID: $diagRsId  Thread: $([System.Threading.Thread]::CurrentThread.ManagedThreadId)  Modules: $((Get-Module | ForEach-Object { $_.Name }) -join ', ')" | Out-File $script:StartupDiagFile -Append
-	$script:IpcDiagFile = Join-Path $script:DiagFolder "ipc.txt"
-	$script:NotifyDiagFile = Join-Path $script:DiagFolder "notify.txt"
-	"=== mJig Notify Diag: $diagTimestamp ===" | Out-File $script:NotifyDiagFile
-	"$(Get-Date -Format 'HH:mm:ss.fff') [INIT] Notification diagnostics started  Mode=$(if ($_WorkerMode) { 'worker' } else { 'viewer' })" | Out-File $script:NotifyDiagFile -Append
-	"=== mJig Settle Diag: $diagTimestamp ===" | Out-File $script:SettleDiagFile
-		"$(Get-Date -Format 'HH:mm:ss.fff') - Settle diagnostics started" | Out-File $script:SettleDiagFile -Append
-			"=== mJig Input Diag: $diagTimestamp ===" | Out-File $script:InputDiagFile
-			"$(Get-Date -Format 'HH:mm:ss.fff') - Input diagnostics started (PeekConsoleInput + GetLastInputInfo)" | Out-File $script:InputDiagFile -Append
-		}
-		
-		if ($_WorkerMode -and $script:_wsDiagFile) {
-			"$(Get-Date -Format 'HH:mm:ss.fff') [4a] About to dot-source Initialize-PInvoke.ps1" | Out-File $script:_wsDiagFile -Append
-		}
 	. "$PSScriptRoot\Private\Config\Initialize-PInvoke.ps1"
 	if ($_WorkerMode -and $script:_wsDiagFile) {
 		"$(Get-Date -Format 'HH:mm:ss.fff') [4b] P/Invoke loaded  ns=$($script:_ApiNamespace)  MouseAPI=$($null -ne $script:MouseAPI)  KeyboardAPI=$($null -ne $script:KeyboardAPI)  ToastAPI=$($null -ne $script:ToastAPI)" | Out-File $script:_wsDiagFile -Append
@@ -754,146 +160,17 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 	if ($script:DiagEnabled -and $script:NotifyDiagFile) {
 		"$(Get-Date -Format 'HH:mm:ss.fff') [PINVOKE] ToastAPI=$($null -ne $script:ToastAPI)  Tier1Failed=$($script:_Tier1NotifyFailed -eq $true)  NotificationsEnabled=$($script:NotificationsEnabled)" | Out-File $script:NotifyDiagFile -Append
 	}
-		
-		# Verify types loaded correctly
-		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 2: Types loaded, verifying" | Out-File $script:StartupDiagFile -Append }
-		try {
-			$null = $script:MouseAPI::GetAsyncKeyState(0x01)
-			$testPoint = New-Object $script:PointType
-			$hasGetCursorPos = $null -ne $script:MouseAPI.GetMethod("GetCursorPos")
-			if ($hasGetCursorPos) {
-				$null = $script:MouseAPI::GetCursorPos([ref]$testPoint)
-			}
-			if ($DebugMode) {
-				Write-Host "  [OK] Windows API types loaded successfully" -ForegroundColor $script:TextSuccess
-			}
-			if ($_WorkerMode -and $script:_wsDiagFile) {
-				"$(Get-Date -Format 'HH:mm:ss.fff') [4c] Type verification OK" | Out-File $script:_wsDiagFile -Append
-			}
-		} catch {
-			if ($_WorkerMode -and $script:_wsDiagFile) {
-				"$(Get-Date -Format 'HH:mm:ss.fff') [4c] Type verification FAILED: $($_.Exception.Message)" | Out-File $script:_wsDiagFile -Append
-			}
-			if ($DebugMode) {
-				Write-Host "  [FAIL] Could not verify keyboard/mouse API: $($_.Exception.Message)" -ForegroundColor $script:TextError
-			}
-			Write-Host "Warning: Could not verify keyboard/mouse API. Some features may be disabled." -ForegroundColor $script:TextWarning
-		}
-		
-		# Auto-detect headless mode when console window is hidden (e.g. scheduled task)
-		if (-not $Headless -and -not $_WorkerMode) {
-			try {
-				$consoleHwnd = $script:MouseAPI::GetConsoleWindow()
-				if ($consoleHwnd -eq [IntPtr]::Zero -or -not $script:MouseAPI::IsWindowVisible($consoleHwnd)) {
-					$Headless = $true
-				}
-			} catch {}
-		}
-		
-		# Apply variance to end time if variance is set and end time is specified (not -1)
-		if ($endTimeInt -ne -1 -and $script:EndVariance -gt 0) {
-			try {
-				$ras = Get-Random -Maximum 3 -Minimum 1
-				if ($ras -eq 1) {
-					$variance = -(Get-Random -Maximum $script:EndVariance)
-					$endTimeInt = $endTimeInt + $variance
-				} else {
-					$variance = (Get-Random -Maximum $script:EndVariance)
-					$endTimeInt = $endTimeInt + $variance
-				}
-				# Ensure time stays within valid range (0-2359)
-				if ($endTimeInt -lt 0) {
-					$endTimeInt = 0
-				} elseif ($endTimeInt -gt 2359) {
-					$endTimeInt = 2359
-				}
-				$endTimeStr = $endTimeInt.ToString().PadLeft(4, '0')
-				if ($DebugMode) {
-					Write-Host "  [OK] Applied variance: $variance minutes, final end time: $endTimeStr" -ForegroundColor $script:TextSuccess
-				}
-			} catch {
-				if ($DebugMode) {
-					Write-Host "  [FAIL] Failed to apply variance: $($_.Exception.Message)" -ForegroundColor $script:TextError
-				}
-			}
-		}
-		
-		# Calculate end date/time only if end time is set (not -1)
-		if ($endTimeInt -ne -1) {
-			try {
-				$currentTime = Get-Date -Format "HHmm"
-				if ($DebugMode) {
-					Write-Host "  [OK] Current time: $currentTime" -ForegroundColor $script:TextSuccess
-				}
-			} catch {
-				if ($DebugMode) {
-					Write-Host "  [FAIL] Failed to get current time: $($_.Exception.Message)" -ForegroundColor $script:TextError
-				}
-				throw
-			}
-			try {
-				if ($endTimeInt -le [int]$currentTime) {
-				$tomorrow = (Get-Date).AddDays(1)
-				$endDate = Get-Date $tomorrow -Format "MMdd"
-				if ($DebugMode) {
-					Write-Host "  [OK] End time is today, using tomorrow's date: $endDate" -ForegroundColor $script:TextSuccess
-					}
-				} else {
-					$endDate = Get-Date -Format "MMdd"
-					if ($DebugMode) {
-						Write-Host "  [OK] End time is today, using today's date: $endDate" -ForegroundColor $script:TextSuccess
-					}
-				}
-				$end = "$endDate$endTimeStr"
-				if ($DebugMode) {
-					Write-Host "  [OK] Final end datetime: $end" -ForegroundColor $script:TextSuccess
-				}
-			} catch {
-				if ($DebugMode) {
-					Write-Host "  [FAIL] Failed to calculate end datetime: $($_.Exception.Message)" -ForegroundColor $script:TextError
-				}
-				throw
-			}
-		} else {
-			$end = ""
-			if ($DebugMode) {
-				Write-Host "  [OK] No end time - script will run indefinitely" -ForegroundColor $script:TextSuccess
-			}
-		}
 
-		# Initialize lastPos for mouse detection
-		if ($DebugMode) {
-			Write-Host "[DEBUG] Initializing mouse position tracking..." -ForegroundColor $script:TextHighlight
-		}
-		try {
-			if ($null -eq $LastPos) {
-				# Use direct Windows API call for better performance (avoids .NET stutter)
-				$point = New-Object $script:PointType
-				$hasGetCursorPos = $null -ne $script:MouseAPI.GetMethod("GetCursorPos")
-				if ($hasGetCursorPos) {
-					if ($script:MouseAPI::GetCursorPos([ref]$point)) {
-						# Convert POINT to System.Drawing.Point for compatibility with rest of code
-						$LastPos = New-Object System.Drawing.Point($point.X, $point.Y)
-					} else {
-						throw "GetCursorPos API call failed"
-					}
-				} else {
-					throw "GetCursorPos method not available"
-				}
-				if ($DebugMode) {
-					Write-Host "  [OK] Initial mouse position: $($LastPos.X), $($LastPos.Y)" -ForegroundColor $script:TextSuccess
-				}
-			} else {
-				if ($DebugMode) {
-					Write-Host "  [OK] Mouse position already set: $($LastPos.X), $($LastPos.Y)" -ForegroundColor $script:TextSuccess
-				}
-			}
-		} catch {
-			if ($DebugMode) {
-				Write-Host "  [FAIL] Failed to get mouse position: $($_.Exception.Message)" -ForegroundColor $script:TextError
-			}
-			# Don't throw - mouse position tracking is optional
-		}
+	# Pre-allocated dialog peek buffer (needs $script:_ApiNamespace from Initialize-PInvoke.ps1)
+	$script:_DialogPeekBuffer = New-Object "$($script:_ApiNamespace).INPUT_RECORD[]" 16
+
+	# P/Invoke type verification + headless auto-detect
+	. "$PSScriptRoot\Private\Config\Confirm-PInvokeTypes.ps1"
+
+	. "$PSScriptRoot\Private\Config\Initialize-EndTime.ps1"
+
+	# Initial mouse position capture
+	. "$PSScriptRoot\Private\Helpers\Initialize-MousePosition.ps1"
 
 		# Track start time for runtime calculation
 		$ScriptStartTime = Get-Date
@@ -911,22 +188,6 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 		# ============================================
 		# Buffered Rendering Functions
 		# ============================================
-
-		$script:ESC = [char]27
-		$script:CSI = "$([char]27)["
-		$script:CursorVisible = $false
-		$script:AnsiFG = @{
-			[ConsoleColor]::Black = 30; [ConsoleColor]::DarkBlue = 34; [ConsoleColor]::DarkGreen = 32; [ConsoleColor]::DarkCyan = 36
-			[ConsoleColor]::DarkRed = 31; [ConsoleColor]::DarkMagenta = 35; [ConsoleColor]::DarkYellow = 33; [ConsoleColor]::Gray = 37
-			[ConsoleColor]::DarkGray = 90; [ConsoleColor]::Blue = 94; [ConsoleColor]::Green = 92; [ConsoleColor]::Cyan = 96
-			[ConsoleColor]::Red = 91; [ConsoleColor]::Magenta = 95; [ConsoleColor]::Yellow = 93; [ConsoleColor]::White = 97
-		}
-		$script:AnsiBG = @{
-			[ConsoleColor]::Black = 40; [ConsoleColor]::DarkBlue = 44; [ConsoleColor]::DarkGreen = 42; [ConsoleColor]::DarkCyan = 46
-			[ConsoleColor]::DarkRed = 41; [ConsoleColor]::DarkMagenta = 45; [ConsoleColor]::DarkYellow = 43; [ConsoleColor]::Gray = 47
-			[ConsoleColor]::DarkGray = 100; [ConsoleColor]::Blue = 104; [ConsoleColor]::Green = 102; [ConsoleColor]::Cyan = 106
-			[ConsoleColor]::Red = 101; [ConsoleColor]::Magenta = 105; [ConsoleColor]::Yellow = 103; [ConsoleColor]::White = 107
-		}
 
 	. "$PSScriptRoot\Private\Rendering\Write-Buffer.ps1"
 
@@ -953,6 +214,7 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 
 	. "$PSScriptRoot\Private\Helpers\Show-Notification.ps1"
 	. "$PSScriptRoot\Private\Helpers\Test-GlobalHotkey.ps1"
+	. "$PSScriptRoot\Private\Helpers\Invoke-DisplaySleep.ps1"
 
 		# Dialog shared helpers (button layout, mouse click detection, key input, exit cleanup)
 		. "$PSScriptRoot\Private\Helpers\Get-DialogButtonLayout.ps1"
@@ -960,53 +222,9 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 		. "$PSScriptRoot\Private\Helpers\Read-DialogKeyInput.ps1"
 		. "$PSScriptRoot\Private\Helpers\Invoke-DialogCleanup.ps1"
 
-		# Pre-allocated buffer for dialog PeekConsoleInput (reused across all dialogs)
-		$script:_DialogPeekBuffer = New-Object "$($script:_ApiNamespace).INPUT_RECORD[]" 16
-
-		# Pre-allocated point for cursor movement animation (avoids per-step allocation)
-		$script:_MovementPoint = New-Object System.Drawing.Point
-
-		# Cached emoji constants (avoid recomputation every frame)
-		$script:HourglassEmoji = [char]::ConvertFromUtf32(0x23F3)   # U+23F3 hourglass
-		$script:LockEmoji      = [char]::ConvertFromUtf32(0x1F512)  # U+1F512 lock
-		$script:GearEmoji      = [char]::ConvertFromUtf32(0x1F6E0)  # U+1F6E0 gear
-		$script:RedXEmoji      = [char]::ConvertFromUtf32(0x274C)   # U+274C red X
-		$script:CheckmarkEmoji = [char]::ConvertFromUtf32(0x2705)   # U+2705 checkmark
-		$script:PauseEmoji     = "$([char]0x275A)$([char]0x275A)"   # U+275A x2 pause bars
-		$script:PlayEmoji      = [char]::ConvertFromUtf32(0x25B6)   # U+25B6 play triangle
-
-		# Cached virtual screen bounds (display config rarely changes during a run)
-		$script:_VirtualScreen = [System.Windows.Forms.SystemInformation]::VirtualScreen
-
 		# Function to show popup dialog for changing end time
 		. "$PSScriptRoot\Private\Dialogs\Show-TimeChangeDialog.ps1"
 
-		# ============================================
-		# Performance Helper Functions
-		# ============================================
-		
-		# Playful quotes for resize screen
-		$script:ResizeQuotes = @(
-			"Jiggling since the dawn of idle timeouts..."
-			"A mouse in motion stays employed"
-			"Wiggle wiggle wiggle"
-			"Like jello, but for your cursor"
-			"Making mice dance since 2024"
-			"The early mouse gets the jiggle"
-			"Shake it like a Polaroid picture"
-			"Keep calm and jiggle on"
-			"This mouse has moves"
-			"Cursor cardio in progress"
-			"Staying active so you don't have to"
-			"Mice just wanna have fun"
-			"Jiggle physics: enabled"
-			"Not all who wander are lost, some are jiggling"
-			"Professional mouse motivator"
-			"Your mouse's personal trainer"
-			"Wiggling through the workday"
-		)
-		$script:CurrentResizeQuote = $null
-		
 	# Re-enables ENABLE_MOUSE_INPUT after [Console]::Clear() strips it
 	. "$PSScriptRoot\Private\Helpers\Restore-ConsoleInputMode.ps1"
 
@@ -1053,8 +271,13 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 		. "$PSScriptRoot\Private\IPC\Start-WorkerLoop.ps1"
 		
 		. "$PSScriptRoot\Private\IPC\Connect-WorkerPipe.ps1"
-		
-		
+
+	. "$PSScriptRoot\Private\IPC\Invoke-ViewerFocusWindow.ps1"
+	. "$PSScriptRoot\Private\IPC\Update-ViewerPipeState.ps1"
+	. "$PSScriptRoot\Private\IPC\Start-BackgroundWorker.ps1"
+	. "$PSScriptRoot\Private\Helpers\Write-StoppedMessage.ps1"
+	. "$PSScriptRoot\Private\Helpers\Wait-MouseSettle.ps1"
+	. "$PSScriptRoot\Private\Startup\Wait-DebugModeKeyPress.ps1"
 		# ============================================
 		# UI Helper Functions
 		# ============================================
@@ -1075,6 +298,9 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 
 		# Function to show quit confirmation dialog
 		. "$PSScriptRoot\Private\Dialogs\Show-QuitConfirmationDialog.ps1"
+
+		# Display sleep confirmation dialog — shown when menu button is clicked
+		. "$PSScriptRoot\Private\Dialogs\Show-DisplaySleepDialog.ps1"
 
 	# Slide-up settings panel; manages sub-dialogs and onfocus/offfocus state
 	. "$PSScriptRoot\Private\Dialogs\Show-SettingsDialog.ps1"
@@ -1151,71 +377,15 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 	
 	# Non-Inline mode with mutex acquired: spawn hidden background worker, then become viewer
 	if (-not $Inline -and $mutexAcquired -and -not $_isViewerMode) {
-		$modulePath = Join-Path $PSScriptRoot 'Start-mJig.psm1'
-		$workerCmd = "Import-Module '$modulePath'; Start-mJig -_WorkerMode -_InModuleRunspace -_PipeName '$($script:PipeName)'"
-		
-		# Forward movement/timing parameters to the worker
-		if ($PSBoundParameters.ContainsKey('IntervalSeconds')) { $workerCmd += " -IntervalSeconds $IntervalSeconds" }
-		if ($PSBoundParameters.ContainsKey('IntervalVariance')) { $workerCmd += " -IntervalVariance $IntervalVariance" }
-		if ($PSBoundParameters.ContainsKey('MoveSpeed')) { $workerCmd += " -MoveSpeed $MoveSpeed" }
-		if ($PSBoundParameters.ContainsKey('MoveVariance')) { $workerCmd += " -MoveVariance $MoveVariance" }
-		if ($PSBoundParameters.ContainsKey('TravelDistance')) { $workerCmd += " -TravelDistance $TravelDistance" }
-		if ($PSBoundParameters.ContainsKey('TravelVariance')) { $workerCmd += " -TravelVariance $TravelVariance" }
-		if ($PSBoundParameters.ContainsKey('AutoResumeDelaySeconds')) { $workerCmd += " -AutoResumeDelaySeconds $AutoResumeDelaySeconds" }
-		if ($PSBoundParameters.ContainsKey('EndTime')) { $workerCmd += " -EndTime '$EndTime'" }
-		if ($PSBoundParameters.ContainsKey('EndVariance')) { $workerCmd += " -EndVariance $EndVariance" }
-		if ($PSBoundParameters.ContainsKey('Output')) { $workerCmd += " -Output '$Output'" }
-		if ($PSBoundParameters.ContainsKey('Title') -and $Title.Length -gt 0) { $workerCmd += " -Title '$Title'" }
-		if ($Diag) { $workerCmd += " -Diag" }
-		
-		$powershellExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-		
-		# Release mutex before spawning — worker acquires its own
-		if ($null -ne $script:InstanceMutex) {
-			try { $script:InstanceMutex.ReleaseMutex() } catch {}
-			$script:InstanceMutex.Dispose()
-			$script:InstanceMutex = $null
-		}
-		
-		# WMI spawn: detaches from terminal job object so worker survives viewer close
-		try {
-			$encodedCmd = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($workerCmd))
-			$cmdLine = "`"$powershellExe`" -NoProfile -NoLogo -WindowStyle Hidden -EncodedCommand $encodedCmd"
-			$cimResult = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine }
-			if ($cimResult.ReturnValue -ne 0) { throw "WMI return code $($cimResult.ReturnValue)" }
-			$null = Get-Process -Id $cimResult.ProcessId -ErrorAction Stop
-		} catch {
-			try {
-				$encodedCmd = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($workerCmd))
-				$workerArgs = @('-NoProfile', '-NoLogo', '-WindowStyle', 'Hidden', '-EncodedCommand', $encodedCmd)
-				$null = Start-Process -FilePath $powershellExe -ArgumentList $workerArgs -WindowStyle Hidden -PassThru
-			} catch {
-				Write-Host "WARNING: Could not start background process. Running in direct mode." -ForegroundColor $script:TextWarning
-				Write-Host "  $($_.Exception.Message)" -ForegroundColor Gray
-				try {
-					$script:InstanceMutex = New-Object System.Threading.Mutex($false, "Global\$($script:SessionId.PipeName)")
-					$mutexAcquired = $script:InstanceMutex.WaitOne(0)
-				} catch { $mutexAcquired = $true }
-				$Inline = $true
-			}
-		}
-		
-		# Headless: worker spawned, exit immediately (no TUI)
-		if ($Headless) {
-			return
-		}
-		
-		if (-not $Inline) {
-			$pipeResult = Connect-WorkerPipe -PipeName $script:PipeName -ConnectTimeoutMs 15000
-			if ($null -eq $pipeResult) {
-				if ($script:DiagEnabled) { Show-DiagnosticFiles }
-				return
-			}
-			$_isViewerMode = $true
+		$_workerResult = Start-BackgroundWorker -BoundParameters $PSBoundParameters -InlineRef ([ref]$Inline) -Headless:$Headless -Diag:$Diag -ModuleRoot $PSScriptRoot
+		if ($_workerResult.ShouldReturn) { return }
+		if ($_workerResult.IsViewerMode) {
+			$pipeResult        = $_workerResult.PipeResult
+			$_isViewerMode     = $true
 			$script:_SkipTrayIcon = $true
-			$_viewerPipeClient = $pipeResult.Client
-			$_viewerPipeReader = $pipeResult.Reader
-			$_viewerPipeWriter = $pipeResult.Writer
+			$_viewerPipeClient = $_workerResult.PipeClient
+			$_viewerPipeReader = $_workerResult.PipeReader
+			$_viewerPipeWriter = $_workerResult.PipeWriter
 		}
 	}
 	# ---- End IPC Mode Branching ----------------------------------------------------
@@ -1265,43 +435,7 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 	if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - CHECKPOINT 4: Before debug mode check (DebugMode=$DebugMode)" | Out-File $script:StartupDiagFile -Append }
 	
 	if ($DebugMode -and -not $_isViewerMode) {
-		if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - ENTERED DEBUG MODE KEY WAIT LOOP" | Out-File $script:StartupDiagFile -Append }
-
-		Write-Host "`nPress any key to start mJig..." -ForegroundColor $script:TextWarning
-
-		$dbgModifierVKs = @(0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C)
-		$hIn      = $script:MouseAPI::GetStdHandle(-10)
-		$peekBuf  = New-Object "$($script:_ApiNamespace).INPUT_RECORD[]" 32
-		$peekEvts = [uint32]0
-		# Drain events buffered before the prompt appeared (e.g. Enter key-up from launch)
-		try { $Host.UI.RawUI.FlushInputBuffer() } catch {}
-		$detected = $false
-		while (-not $detected) {
-			Start-Sleep -Milliseconds 5
-			try {
-				if ($script:MouseAPI::PeekConsoleInput($hIn, $peekBuf, 32, [ref]$peekEvts) -and $peekEvts -gt 0) {
-					for ($e = 0; $e -lt [int]$peekEvts; $e++) {
-						if ($peekBuf[$e].EventType -eq 0x0001 -and $peekBuf[$e].KeyEvent.bKeyDown -eq 0 -and
-						    $peekBuf[$e].KeyEvent.wVirtualKeyCode -notin $dbgModifierVKs) {
-							$detected = $true; break
-						}
-					}
-					if ($detected) {
-						$flushBuf = New-Object "$($script:_ApiNamespace).INPUT_RECORD[]" $peekEvts
-						$flushed  = [uint32]0
-						$script:MouseAPI::ReadConsoleInput($hIn, $flushBuf, $peekEvts, [ref]$flushed) | Out-Null
-					}
-				}
-			} catch {
-				if ($Host.UI.RawUI.KeyAvailable) {
-					try { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown,IncludeKeyUp,AllowCtrlC") } catch {}
-					$detected = $true
-				} else {
-					Start-Sleep -Milliseconds 45
-				}
-			}
-		}
-
+		Wait-DebugModeKeyPress
 	}
 
 	# Key-up detection above already flushes all buffered events via ReadConsoleInput,
@@ -1338,6 +472,8 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 	# Viewer-mode interval-boundary input accumulation (persists across main-loop iterations)
 	$_viewerWorkerIter         = -1
 	$_viewerWorkerIterChanged  = $false
+	# $_viewerWorkerIter is mutated by Update-ViewerPipeState via scope chain
+	$null = $_viewerWorkerIter
 	$_viewerIntervalMouseTypes = [System.Collections.Generic.HashSet[string]]::new()
 	$_viewerIntervalKbDetected = $false
 	$_viewerIntervalKbInferred = $false
@@ -1406,36 +542,41 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 					@{ priority = 2; text = " - $(if ($script:ManualPause) { "$($script:WindowTitle) paused" } else { "$($script:WindowTitle) resumed" }) via hotkey"; shortText = " - $(if ($script:ManualPause) { "$($script:WindowTitle) paused" } else { "$($script:WindowTitle) resumed" })" }
 				)
 			})
-		} elseif ($_globalAction -eq 'quit') {
-			Show-Notification -Body "Stopped" -Action quit
-			Clear-Host
-			$runtime = (Get-Date) - $ScriptStartTime
-			$hours = [math]::Floor($runtime.TotalHours)
-			$minutes = $runtime.Minutes
-			$seconds = $runtime.Seconds
-			$runtimeStr = ""
-			if ($hours -gt 0) {
-				$runtimeStr = "$hours hour$(if ($hours -ne 1) { 's' }), $minutes minute$(if ($minutes -ne 1) { 's' })"
-			} elseif ($minutes -gt 0) {
-				$runtimeStr = "$minutes minute$(if ($minutes -ne 1) { 's' }), $seconds second$(if ($seconds -ne 1) { 's' })"
+	} elseif ($_globalAction -eq 'toggleDisplaySleep') {
+		if (-not $script:DisplaySleepMode) {
+			Start-Sleep -Milliseconds 500
+			$null = Invoke-DisplaySleep -Action Sleep
+			$script:DisplaySleepMode       = $true
+			$script:DisplaySleepActivatedAt = Get-Date
+			$script:DisplaySleepPrePos      = Get-MousePosition
+				if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
+				$null = $LogArray.Add([PSCustomObject]@{
+					logRow = $true
+					components = @(
+						@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
+						@{ priority = 2; text = " - Display sleep activated via hotkey"; shortText = " - Display sleep on" }
+					)
+				})
 			} else {
-				$runtimeStr = "$seconds second$(if ($seconds -ne 1) { 's' })"
+				if (Invoke-DisplaySleep -Action Wake) {
+					$script:DisplaySleepMode = $false
+					$script:DisplaySleepActivatedAt = $null
+					$script:_DisplaySleepLastInputTime = Get-Date
+					if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
+					$null = $LogArray.Add([PSCustomObject]@{
+						logRow = $true
+						components = @(
+							@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
+							@{ priority = 2; text = " - Display wake confirmed via hotkey"; shortText = " - Display wake ok" }
+						)
+					})
+				}
 			}
-			Write-Host ""
-			$mouseEmoji = [char]::ConvertFromUtf32(0x1F400)
-			Write-Host "  mJig(" -NoNewline -ForegroundColor $script:HeaderAppName
-			$mouseEmojiX = $Host.UI.RawUI.CursorPosition.X
-			$mouseEmojiY = $Host.UI.RawUI.CursorPosition.Y
-			Write-Host $mouseEmoji -NoNewline -ForegroundColor $script:HeaderIcon
-			[Console]::SetCursorPosition($mouseEmojiX + 2, $mouseEmojiY)
-			Write-Host ") " -NoNewline -ForegroundColor $script:HeaderAppName
-			Write-Host "Stopped" -ForegroundColor $script:TextError
-			Write-Host ""
-			Write-Host "  Runtime: " -NoNewline -ForegroundColor $script:TextMuted
-			Write-Host $runtimeStr -ForegroundColor $script:TextDefault
-			Write-Host ""
-			break process
-		}
+	} elseif ($_globalAction -eq 'quit') {
+		Show-Notification -Body "Stopped" -Action quit
+		Write-StoppedMessage -ScriptStartTime $ScriptStartTime
+		break process
+	}
 	}
 	# ---- End Global Hotkey Polling ------------------------------------------------
 
@@ -1448,180 +589,7 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 			try {
 				$msg = Read-PipeMessage -Reader $_viewerPipeReader -PendingTask ([ref]$_viewerReadTask)
 				while ($null -ne $msg) {
-					switch ($msg.type) {
-						'state' {
-							$messageEpoch = if ($null -ne $msg.epoch) { [int]$msg.epoch } else { 0 }
-							if ($messageEpoch -lt $_settingsEpoch) { break }
-							$script:IntervalSeconds = [double]$msg.intervalSeconds
-							$script:IntervalVariance = [double]$msg.intervalVariance
-							$script:MoveSpeed = [double]$msg.moveSpeed
-							$script:MoveVariance = [double]$msg.moveVariance
-							$script:TravelDistance = [double]$msg.travelDistance
-							$script:TravelVariance = [double]$msg.travelVariance
-							$script:AutoResumeDelaySeconds = [double]$msg.autoResumeDelaySeconds
-							$script:LoopIteration = [int]$msg.loopIteration
-						$_incomingIter = [int]$msg.loopIteration
-						if ($_incomingIter -ne $_viewerWorkerIter) { $_viewerWorkerIterChanged = $true; $_viewerWorkerIter = $_incomingIter }
-							$endTimeStr = [string]$msg.endTimeStr
-							$endTimeInt = [int]$msg.endTimeInt
-							$end = [string]$msg.end
-							$cooldownActive = [bool]$msg.cooldownActive
-							$secondsRemaining = if ($null -ne $msg.cooldownRemaining) { [int]$msg.cooldownRemaining } else { 0 }
-							if ([bool]$msg.mouseInputDetected) {
-								$mouseInputDetected = $true
-								$null = $intervalMouseInputs.Add("Mouse")
-							}
-							if ([bool]$msg.keyboardInputDetected) { $keyboardInputDetected = $true }
-							if ([bool]$msg.keyboardInferred) { $_keyboardInferred = $true }
-							$SkipUpdate = [bool]$msg.userInputDetected -or $cooldownActive
-					# Stats from worker
-					if ($null -ne $msg.statsWorkerStartTime) { try { $ScriptStartTime = [DateTime]::Parse([string]$msg.statsWorkerStartTime) } catch {} }
-						if ($null -ne $msg.statsMoveCount)             { $script:StatsMoveCount             = [int]$msg.statsMoveCount }
-						if ($null -ne $msg.statsSkipCount)             { $script:StatsSkipCount             = [int]$msg.statsSkipCount }
-						if ($null -ne $msg.statsCurrentStreak)         { $script:StatsCurrentStreak         = [int]$msg.statsCurrentStreak }
-						if ($null -ne $msg.statsLongestStreak)         { $script:StatsLongestStreak         = [int]$msg.statsLongestStreak }
-						if ($null -ne $msg.statsTotalDistancePx)       { $script:StatsTotalDistancePx       = [double]$msg.statsTotalDistancePx }
-						if ($null -ne $msg.statsLastMoveDist)          { $script:StatsLastMoveDist          = [double]$msg.statsLastMoveDist }
-						if ($null -ne $msg.statsMinMoveDist)           { $script:StatsMinMoveDist           = [double]$msg.statsMinMoveDist }
-						if ($null -ne $msg.statsMaxMoveDist)           { $script:StatsMaxMoveDist           = [double]$msg.statsMaxMoveDist }
-						if ($null -ne $msg.statsLastMoveDurationMs)    { $LastMovementDurationMs            = [int]$msg.statsLastMoveDurationMs }
-						if ($null -ne $msg.statsLastMoveSecondsAgo)    { $LastMovementTime                  = (Get-Date).AddSeconds(-[int]$msg.statsLastMoveSecondsAgo) }
-						if ($null -ne $msg.statsKbInterruptCount)      { $script:StatsKbInterruptCount      = [int]$msg.statsKbInterruptCount }
-							if ($null -ne $msg.statsMsInterruptCount)      { $script:StatsMsInterruptCount      = [int]$msg.statsMsInterruptCount }
-							if ($null -ne $msg.statsLongestCleanStreak)    { $script:StatsLongestCleanStreak    = [int]$msg.statsLongestCleanStreak }
-							if ($null -ne $msg.statsAvgActualIntervalSecs) { $script:StatsAvgActualIntervalSecs = [double]$msg.statsAvgActualIntervalSecs }
-							if ($null -ne $msg.statsAvgDurationMs)         { $script:StatsAvgDurationMs         = [double]$msg.statsAvgDurationMs }
-							if ($null -ne $msg.statsMinDurationMs)         { $script:StatsMinDurationMs         = [int]$msg.statsMinDurationMs }
-							if ($null -ne $msg.statsMaxDurationMs)         { $script:StatsMaxDurationMs         = [int]$msg.statsMaxDurationMs }
-							if ($null -ne $msg.statsDirectionCounts) {
-								foreach ($_sdir in @('N','NE','E','SE','S','SW','W','NW')) {
-									$script:StatsDirectionCounts[$_sdir] = [double]$msg.statsDirectionCounts.$_sdir
-								}
-							}
-							if ($null -ne $msg.statsLastCurveParams -and $null -ne $msg.statsLastCurveParams.Distance) {
-								$script:StatsLastCurveParams = @{
-									Distance      = [double]$msg.statsLastCurveParams.Distance
-									StartArcAmt   = [double]$msg.statsLastCurveParams.StartArcAmt
-									StartArcSign  = [int]$msg.statsLastCurveParams.StartArcSign
-									BodyCurveAmt  = [double]$msg.statsLastCurveParams.BodyCurveAmt
-									BodyCurveSign = [int]$msg.statsLastCurveParams.BodyCurveSign
-									BodyCurveType = [int]$msg.statsLastCurveParams.BodyCurveType
-								}
-							$_ck = "$($script:StatsLastCurveParams.Distance)|$($script:StatsLastCurveParams.StartArcAmt)|$($script:StatsLastCurveParams.BodyCurveAmt)|$($script:StatsLastCurveParams.BodyCurveType)"
-							if ($_ck -ne $script:_LastCurveParamKey) { $script:_LastCurveParamKey = $_ck; $script:StatsCurveAnimPending = $true }
-							}
-						}
-						'log' {
-							if ($null -ne $LogArray -and -not $script:ManualPause) {
-								$components = @()
-								foreach ($c in $msg.components) {
-									$components += @{
-										priority = [int]$c.priority
-										text = [string]$c.text
-										shortText = [string]$c.shortText
-									}
-								}
-								if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) {
-									$LogArray.RemoveAt(0)
-								}
-								$null = $LogArray.Add([PSCustomObject]@{ logRow = $true; components = $components })
-							}
-						}
-						'togglePause' {
-							$script:ManualPause = [bool]$msg.paused
-							if ($null -ne $msg.logMsg -and $null -ne $LogArray) {
-								$components = @()
-								foreach ($c in $msg.logMsg.components) {
-									$components += @{
-										priority = [int]$c.priority
-										text = [string]$c.text
-										shortText = [string]$c.shortText
-									}
-								}
-								if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) {
-									$LogArray.RemoveAt(0)
-								}
-								$null = $LogArray.Add([PSCustomObject]@{ logRow = $true; components = $components })
-							}
-					}
-						'stopped' {
-							$_viewerStopped = $true
-							$_viewerStopReason = if ($null -ne $msg.reason) { $msg.reason } else { 'unknown' }
-						}
-					'focus' {
-						# Resolve and cache the actual terminal window handle.
-						# GetConsoleWindow() returns a hidden ConPTY pseudo-window in Windows Terminal;
-						# IsWindowVisible distinguishes the real window from the pseudo-window.
-						if ($null -eq $script:_ViewerTerminalHwnd) {
-							$_fHwnd = $script:MouseAPI::GetConsoleWindow()
-							if ($_fHwnd -ne [IntPtr]::Zero) {
-								$_fRoot = $script:MouseAPI::GetAncestor($_fHwnd, 3)
-								if ($_fRoot -ne [IntPtr]::Zero) { $_fHwnd = $_fRoot }
-							}
-							if ($_fHwnd -eq [IntPtr]::Zero -or -not $script:MouseAPI::IsWindowVisible($_fHwnd)) {
-								# Windows Terminal: GetConsoleWindow returned a hidden pseudo-window.
-								# Walk the parent process chain to find the actual terminal window.
-								$_fWalkPid = $PID
-								$_fSkip    = @('pwsh','powershell','powershell_ise','cmd','conhost','openconsole',
-								               'csrss','wininit','services','svchost','lsass','system','idle')
-								$_fAllow   = @('windowsterminal','alacritty','wezterm-gui','wezterm','mintty',
-								               'conemu64','conemuc64','cmder','hyper','terminus','tabby','fluent-terminal')
-								$_fVisited = @{}
-								while ($_fWalkPid -gt 0 -and -not $_fVisited.ContainsKey($_fWalkPid)) {
-									$_fVisited[$_fWalkPid] = $true
-									try {
-										$_fWmi = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $_fWalkPid" -EA SilentlyContinue
-										if (-not $_fWmi) { break }
-										$_fParentPid = [int]$_fWmi.ParentProcessId
-										if ($_fParentPid -le 0 -or $_fParentPid -eq $_fWalkPid) { break }
-										$_fParent = Get-Process -Id $_fParentPid -EA SilentlyContinue
-										if (-not $_fParent) { break }
-										$_fExe = [System.IO.Path]::GetFileNameWithoutExtension($_fParent.ProcessName).ToLower()
-										if ($_fExe -in $_fAllow) {
-											$_fHwnd = $script:MouseAPI::FindMainWindowByProcessId($_fParentPid)
-											break
-										} elseif ($_fExe -in $_fSkip) {
-											$_fWalkPid = $_fParentPid
-										} else { break }
-									} catch { break }
-								}
-							}
-							$script:_ViewerTerminalHwnd = $_fHwnd
-						}
-						$hwnd = $script:_ViewerTerminalHwnd
-						if ($hwnd -ne [IntPtr]::Zero) {
-							if ($script:MouseAPI::IsIconic($hwnd)) {
-								$null = $script:MouseAPI::ShowWindow($hwnd, 9)
-								$_restoreMs = 0
-								while ($script:MouseAPI::IsIconic($hwnd) -and $_restoreMs -lt 500) {
-									Start-Sleep -Milliseconds 20
-									$_restoreMs += 20
-								}
-								# Fallback for Windows Terminal: PostMessage WM_SYSCOMMAND/SC_RESTORE.
-								# ShowWindow from a cross-process caller may be ignored by WinUI windows.
-								if ($script:MouseAPI::IsIconic($hwnd)) {
-									$null = $script:MouseAPI::PostMessage($hwnd, [uint32]0x0112, [IntPtr]0xF120, [IntPtr]::Zero)
-									$_restoreMs = 0
-									while ($script:MouseAPI::IsIconic($hwnd) -and $_restoreMs -lt 500) {
-										Start-Sleep -Milliseconds 20
-										$_restoreMs += 20
-									}
-								}
-							}
-							$foregroundWindow    = $script:MouseAPI::GetForegroundWindow()
-							$foregroundThread = $script:MouseAPI::GetWindowThreadProcessId($foregroundWindow, [ref]0)
-							$currentThread = $script:MouseAPI::GetCurrentThreadId()
-							if ($foregroundThread -ne 0 -and $foregroundThread -ne $currentThread) {
-								$null = $script:MouseAPI::AttachThreadInput($foregroundThread, $currentThread, $true)
-							}
-							$null = $script:MouseAPI::BringWindowToTop($hwnd)
-							$null = $script:MouseAPI::SetForegroundWindow($hwnd)
-							if ($foregroundThread -ne 0 -and $foregroundThread -ne $currentThread) {
-								$null = $script:MouseAPI::AttachThreadInput($foregroundThread, $currentThread, $false)
-							}
-						}
-					}
-					}
+					. $_handleIpcMsg
 					if ($_viewerStopped) { break }
 					$msg = Read-PipeMessage -Reader $_viewerPipeReader -PendingTask ([ref]$_viewerReadTask)
 				}
@@ -1701,187 +669,13 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 				$date = Get-Date  # keep $date fresh each 50ms tick for accurate timestamps
 
 			# Viewer: read IPC messages each tick for real-time state/log updates
-			if ($_isViewerMode) {
-				if ($_viewerPipeClient.IsConnected) {
-					try {
-						$msg = Read-PipeMessage -Reader $_viewerPipeReader -PendingTask ([ref]$_viewerReadTask)
-						while ($null -ne $msg) {
-						switch ($msg.type) {
-						'state' {
-							$messageEpoch = if ($null -ne $msg.epoch) { [int]$msg.epoch } else { 0 }
-							if ($messageEpoch -lt $_settingsEpoch) { break }
-							$script:IntervalSeconds = [double]$msg.intervalSeconds
-							$script:IntervalVariance = [double]$msg.intervalVariance
-							$script:MoveSpeed = [double]$msg.moveSpeed
-							$script:MoveVariance = [double]$msg.moveVariance
-							$script:TravelDistance = [double]$msg.travelDistance
-							$script:TravelVariance = [double]$msg.travelVariance
-							$script:AutoResumeDelaySeconds = [double]$msg.autoResumeDelaySeconds
-							$script:LoopIteration = [int]$msg.loopIteration
-						$_incomingIter = [int]$msg.loopIteration
-						if ($_incomingIter -ne $_viewerWorkerIter) { $_viewerWorkerIterChanged = $true; $_viewerWorkerIter = $_incomingIter }
-							$endTimeStr = [string]$msg.endTimeStr
-							$endTimeInt = [int]$msg.endTimeInt
-							$end = [string]$msg.end
-							$cooldownActive = [bool]$msg.cooldownActive
-							$secondsRemaining = if ($null -ne $msg.cooldownRemaining) { [int]$msg.cooldownRemaining } else { 0 }
-							if ([bool]$msg.mouseInputDetected) {
-								$mouseInputDetected = $true
-								$null = $intervalMouseInputs.Add("Mouse")
-							}
-							if ([bool]$msg.keyboardInputDetected) { $keyboardInputDetected = $true }
-							if ([bool]$msg.keyboardInferred) { $_keyboardInferred = $true }
-							$SkipUpdate = [bool]$msg.userInputDetected -or $cooldownActive
-					# Stats from worker (wait-loop tick handler)
-					if ($null -ne $msg.statsWorkerStartTime) { try { $ScriptStartTime = [DateTime]::Parse([string]$msg.statsWorkerStartTime) } catch {} }
-						if ($null -ne $msg.statsMoveCount)             { $script:StatsMoveCount             = [int]$msg.statsMoveCount }
-						if ($null -ne $msg.statsSkipCount)             { $script:StatsSkipCount             = [int]$msg.statsSkipCount }
-						if ($null -ne $msg.statsCurrentStreak)         { $script:StatsCurrentStreak         = [int]$msg.statsCurrentStreak }
-						if ($null -ne $msg.statsLongestStreak)         { $script:StatsLongestStreak         = [int]$msg.statsLongestStreak }
-						if ($null -ne $msg.statsTotalDistancePx)       { $script:StatsTotalDistancePx       = [double]$msg.statsTotalDistancePx }
-						if ($null -ne $msg.statsLastMoveDist)          { $script:StatsLastMoveDist          = [double]$msg.statsLastMoveDist }
-						if ($null -ne $msg.statsMinMoveDist)           { $script:StatsMinMoveDist           = [double]$msg.statsMinMoveDist }
-						if ($null -ne $msg.statsMaxMoveDist)           { $script:StatsMaxMoveDist           = [double]$msg.statsMaxMoveDist }
-						if ($null -ne $msg.statsLastMoveDurationMs)    { $LastMovementDurationMs            = [int]$msg.statsLastMoveDurationMs }
-						if ($null -ne $msg.statsLastMoveSecondsAgo)    { $LastMovementTime                  = (Get-Date).AddSeconds(-[int]$msg.statsLastMoveSecondsAgo) }
-						if ($null -ne $msg.statsKbInterruptCount)      { $script:StatsKbInterruptCount      = [int]$msg.statsKbInterruptCount }
-							if ($null -ne $msg.statsMsInterruptCount)      { $script:StatsMsInterruptCount      = [int]$msg.statsMsInterruptCount }
-							if ($null -ne $msg.statsLongestCleanStreak)    { $script:StatsLongestCleanStreak    = [int]$msg.statsLongestCleanStreak }
-							if ($null -ne $msg.statsAvgActualIntervalSecs) { $script:StatsAvgActualIntervalSecs = [double]$msg.statsAvgActualIntervalSecs }
-							if ($null -ne $msg.statsAvgDurationMs)         { $script:StatsAvgDurationMs         = [double]$msg.statsAvgDurationMs }
-							if ($null -ne $msg.statsMinDurationMs)         { $script:StatsMinDurationMs         = [int]$msg.statsMinDurationMs }
-							if ($null -ne $msg.statsMaxDurationMs)         { $script:StatsMaxDurationMs         = [int]$msg.statsMaxDurationMs }
-							if ($null -ne $msg.statsDirectionCounts) {
-								foreach ($_sdir in @('N','NE','E','SE','S','SW','W','NW')) {
-									$script:StatsDirectionCounts[$_sdir] = [double]$msg.statsDirectionCounts.$_sdir
-								}
-							}
-							if ($null -ne $msg.statsLastCurveParams -and $null -ne $msg.statsLastCurveParams.Distance) {
-								$script:StatsLastCurveParams = @{
-									Distance      = [double]$msg.statsLastCurveParams.Distance
-									StartArcAmt   = [double]$msg.statsLastCurveParams.StartArcAmt
-									StartArcSign  = [int]$msg.statsLastCurveParams.StartArcSign
-									BodyCurveAmt  = [double]$msg.statsLastCurveParams.BodyCurveAmt
-									BodyCurveSign = [int]$msg.statsLastCurveParams.BodyCurveSign
-									BodyCurveType = [int]$msg.statsLastCurveParams.BodyCurveType
-								}
-							$_ck = "$($script:StatsLastCurveParams.Distance)|$($script:StatsLastCurveParams.StartArcAmt)|$($script:StatsLastCurveParams.BodyCurveAmt)|$($script:StatsLastCurveParams.BodyCurveType)"
-							if ($_ck -ne $script:_LastCurveParamKey) { $script:_LastCurveParamKey = $_ck; $script:StatsCurveAnimPending = $true }
-							}
-						}
-						'log' {
-							if ($null -ne $LogArray -and -not $script:ManualPause) {
-								$components = @()
-								foreach ($c in $msg.components) {
-									$components += @{
-										priority = [int]$c.priority
-										text = [string]$c.text
-										shortText = [string]$c.shortText
-									}
-								}
-									if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) {
-										$LogArray.RemoveAt(0)
-									}
-									$null = $LogArray.Add([PSCustomObject]@{ logRow = $true; components = $components })
-								}
-							}
-							'togglePause' {
-								$script:ManualPause = [bool]$msg.paused
-								if ($null -ne $msg.logMsg -and $null -ne $LogArray) {
-									$components = @()
-									foreach ($c in $msg.logMsg.components) {
-										$components += @{
-											priority = [int]$c.priority
-											text = [string]$c.text
-											shortText = [string]$c.shortText
-										}
-									}
-									if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) {
-										$LogArray.RemoveAt(0)
-									}
-									$null = $LogArray.Add([PSCustomObject]@{ logRow = $true; components = $components })
-								}
-							}
-							'stopped' {
-								$_viewerStopped = $true
-								$_viewerStopReason = if ($null -ne $msg.reason) { $msg.reason } else { 'unknown' }
-							}
-				'focus' {
-					# Resolve and cache the actual terminal window handle.
-					# In Windows Terminal v1.14+, GetConsoleWindow() returns a ConPTY pseudo-window
-					# that is OWNED (not parented) by the WT main window. GA_ROOTOWNER=3 walks the
-					# owner chain to reach the real window; GA_ROOT=2 (parent chain only) returns
-					# the hidden pseudo-window itself, yielding the wrong handle.
-					if ($null -eq $script:_ViewerTerminalHwnd) {
-						$_fHwnd = $script:MouseAPI::GetConsoleWindow()
-						if ($_fHwnd -ne [IntPtr]::Zero) {
-							$_fRoot = $script:MouseAPI::GetAncestor($_fHwnd, 3)
-							if ($_fRoot -ne [IntPtr]::Zero) { $_fHwnd = $_fRoot }
-						}
-						if ($_fHwnd -eq [IntPtr]::Zero -or -not $script:MouseAPI::IsWindowVisible($_fHwnd)) {
-							# Pre-v1.14 WT or other terminal: fall back to parent process tree walk.
-							$_fWalkPid = $PID
-							$_fSkip    = @('pwsh','powershell','powershell_ise','cmd','conhost','openconsole',
-							               'csrss','wininit','services','svchost','lsass','system','idle')
-							$_fAllow   = @('windowsterminal','alacritty','wezterm-gui','wezterm','mintty',
-							               'conemu64','conemuc64','cmder','hyper','terminus','tabby','fluent-terminal')
-							$_fVisited = @{}
-							while ($_fWalkPid -gt 0 -and -not $_fVisited.ContainsKey($_fWalkPid)) {
-								$_fVisited[$_fWalkPid] = $true
-								try {
-									$_fWmi = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $_fWalkPid" -EA SilentlyContinue
-									if (-not $_fWmi) { break }
-									$_fParentPid = [int]$_fWmi.ParentProcessId
-									if ($_fParentPid -le 0 -or $_fParentPid -eq $_fWalkPid) { break }
-									$_fParent = Get-Process -Id $_fParentPid -EA SilentlyContinue
-									if (-not $_fParent) { break }
-									$_fExe = [System.IO.Path]::GetFileNameWithoutExtension($_fParent.ProcessName).ToLower()
-									if ($_fExe -in $_fAllow) {
-										$_fHwnd = $script:MouseAPI::FindMainWindowByProcessId($_fParentPid)
-										break
-									} elseif ($_fExe -in $_fSkip) {
-										$_fWalkPid = $_fParentPid
-									} else { break }
-								} catch { break }
-							}
-						}
-						$script:_ViewerTerminalHwnd = $_fHwnd
-					}
-					$hwnd = $script:_ViewerTerminalHwnd
-					if ($hwnd -ne [IntPtr]::Zero) {
-						if ($script:MouseAPI::IsIconic($hwnd)) {
-							$null = $script:MouseAPI::ShowWindow($hwnd, 9)
-							$_restoreMs = 0
-							while ($script:MouseAPI::IsIconic($hwnd) -and $_restoreMs -lt 500) {
-								Start-Sleep -Milliseconds 20
-								$_restoreMs += 20
-							}
-							# Fallback for Windows Terminal: PostMessage WM_SYSCOMMAND/SC_RESTORE.
-							# ShowWindow from a cross-process caller may be ignored by WinUI windows.
-							if ($script:MouseAPI::IsIconic($hwnd)) {
-								$null = $script:MouseAPI::PostMessage($hwnd, [uint32]0x0112, [IntPtr]0xF120, [IntPtr]::Zero)
-								$_restoreMs = 0
-								while ($script:MouseAPI::IsIconic($hwnd) -and $_restoreMs -lt 500) {
-									Start-Sleep -Milliseconds 20
-									$_restoreMs += 20
-								}
-							}
-						}
-						$foregroundWindow    = $script:MouseAPI::GetForegroundWindow()
-						$foregroundThread = $script:MouseAPI::GetWindowThreadProcessId($foregroundWindow, [ref]0)
-						$currentThread = $script:MouseAPI::GetCurrentThreadId()
-						if ($foregroundThread -ne 0 -and $foregroundThread -ne $currentThread) {
-							$null = $script:MouseAPI::AttachThreadInput($foregroundThread, $currentThread, $true)
-						}
-						$null = $script:MouseAPI::BringWindowToTop($hwnd)
-						$null = $script:MouseAPI::SetForegroundWindow($hwnd)
-						if ($foregroundThread -ne 0 -and $foregroundThread -ne $currentThread) {
-							$null = $script:MouseAPI::AttachThreadInput($foregroundThread, $currentThread, $false)
-						}
-					}
-				}
-					}
-					if ($_viewerStopped) { break }
+		if ($_isViewerMode) {
+			if ($_viewerPipeClient.IsConnected) {
+				try {
+					$msg = Read-PipeMessage -Reader $_viewerPipeReader -PendingTask ([ref]$_viewerReadTask)
+					while ($null -ne $msg) {
+						. $_handleIpcMsg
+						if ($_viewerStopped) { break }
 						$msg = Read-PipeMessage -Reader $_viewerPipeReader -PendingTask ([ref]$_viewerReadTask)
 					}
 				} catch {
@@ -1894,7 +688,7 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 				$_viewerStopReason = 'disconnected'
 			}
 			if ($_viewerStopped) { break waitLoop }
-				}
+		}
 
 				if (-not $_isViewerMode) {
 				# Check for system-wide keyboard input every 50ms for maximum reliability
@@ -2096,9 +890,9 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 						} catch {
 							if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - GetLastInputInfo ERROR: $($_.Exception.Message)" | Out-File $script:InputDiagFile -Append }
 						}
-					} # end if (-not $_isViewerMode) — GetLastInputInfo
-						
-						# Check for left-click via console input buffer (exact cell coordinates from the console)
+				} # end if (-not $_isViewerMode) — GetLastInputInfo
+
+				# Check for left-click via console input buffer (exact cell coordinates from the console)
 						if ($null -ne $script:ConsoleClickCoords) {
 							$consoleX = $script:ConsoleClickCoords.X
 							$consoleY = $script:ConsoleClickCoords.Y
@@ -2199,11 +993,13 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 					
 					# Check for console keyboard input (menu hotkeys) - only every 200ms to avoid stutter
 					# Also check for menu clicks immediately (they are set by mouse click handler)
-					$menuHotkeyToProcess = $null
-					if ($null -ne $script:MenuClickHotkey) {
-						# Menu item was clicked - process it immediately
-						$menuHotkeyToProcess = $script:MenuClickHotkey
-						$script:MenuClickHotkey = $null  # Clear it after using
+				$menuHotkeyToProcess = $null
+				$_menuTriggeredByClick = $false
+				if ($null -ne $script:MenuClickHotkey) {
+					# Menu item was clicked - process it immediately
+					$menuHotkeyToProcess   = $script:MenuClickHotkey
+					$_menuTriggeredByClick = $true
+					$script:MenuClickHotkey = $null  # Clear it after using
 					} elseif ($tickIndex % 4 -eq 0) {
 						# Read available keys for menu hotkeys (only every 200ms)
 						$lastKeyPress = $null
@@ -2273,14 +1069,72 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 						Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
 						break
 					}
-					# Process menu hotkeys (check both lastKeyPress and menuHotkeyToProcess)
-					if ($null -ne $menuHotkeyToProcess) {
-						# Process menu click hotkey immediately
-						$lastKeyPress = $menuHotkeyToProcess
-						$lastKeyInfo = $null
+				# Process menu hotkeys (check both lastKeyPress and menuHotkeyToProcess)
+				if ($null -ne $menuHotkeyToProcess) {
+					# Process menu click hotkey immediately
+					$lastKeyPress = $menuHotkeyToProcess
+					$lastKeyInfo = $null
+				}
+
+				# Display sleep wake check — same detection timing as menu button presses.
+				# Grace window: ignore all input for 1.5 s after sleep is activated, so that
+				# the keypress or click that triggered sleep does not immediately re-wake the display.
+				# Keyboard, click, and $mouseInputDetected (same flag that skips the movement interval)
+				# use Wake. Raw PrePos cursor drift without that flag uses Verify only (power-cycle /
+				# already-on); automated SetCursorPos does not set $mouseInputDetected (worker filters
+				# recentAutoMove; inline updates lastMousePosCheck after each settle).
+				if ($script:DisplaySleepMode -and $null -ne $script:DisplaySleepActivatedAt -and
+						((Get-Date) - $script:DisplaySleepActivatedAt).TotalMilliseconds -gt 1500) {
+					$_wakeMousePos    = Get-MousePosition
+					$_wakeMouseMoved  = ($null -ne $_wakeMousePos) -and (Test-MouseMoved -CurrentPos $_wakeMousePos -LastPos $script:DisplaySleepPrePos -Threshold 5)
+					$_wakeHadClick    = $null -ne $script:ConsoleClickCoords
+					# [char]0 is also excluded by the ReadKey loop's truthiness check on $keyPress,
+					# but the VK guard is belt-and-suspenders against any keyboard layout that may
+					# produce a non-zero character for the Right Alt keep-alive key.
+					$_wakeHadKey = $null -ne $lastKeyPress -and
+						($null -eq $lastKeyInfo -or $lastKeyInfo.VirtualKeyCode -notin @(18, 165))
+					if ($_wakeHadClick -or $_wakeHadKey -or $mouseInputDetected) {
+						# Explicit wake: same user-input signal as interval skip (incl. real mouse)
+						if (Invoke-DisplaySleep -Action Wake) {
+							$script:DisplaySleepMode        = $false
+							$script:DisplaySleepActivatedAt = $null
+							$script:_DisplaySleepLastInputTime = Get-Date
+							$lastKeyPress = $null
+							$lastKeyInfo  = $null
+							if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleep'; active = $false } } catch {} }
+							if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
+							$null = $LogArray.Add([PSCustomObject]@{
+								logRow = $true
+								components = @(
+									@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
+									@{ priority = 2; text = " - Display woke on user input"; shortText = " - Display wake ok" }
+								)
+							})
+							Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
+						}
+						# On failure: Invoke-DisplaySleep plays retry beep; flag stays set, next input retries
+					} elseif ($_wakeMouseMoved) {
+						# Verify only: panel already on (power-cycle) without classified user mouse.
+						# Automated SetCursorPos moves the cursor but leaves VCP off — returns false, no action.
+						if (Invoke-DisplaySleep -Action Verify) {
+							$script:DisplaySleepMode        = $false
+							$script:DisplaySleepActivatedAt = $null
+							$script:_DisplaySleepLastInputTime = Get-Date
+							if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleep'; active = $false } } catch {} }
+							if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
+							$null = $LogArray.Add([PSCustomObject]@{
+								logRow = $true
+								components = @(
+									@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
+									@{ priority = 2; text = " - Display woke via already-on detect"; shortText = " - Display wake ok" }
+								)
+							})
+							Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
+						}
 					}
-					
-					if ($null -ne $lastKeyPress -or $null -ne $lastKeyInfo) {
+				}
+
+				if ($null -ne $lastKeyPress -or $null -ne $lastKeyInfo) {
 						$shouldProcessEscape = ($lastKeyPress -eq "Escape" -or ($null -ne $lastKeyInfo -and ($lastKeyInfo.Key -eq "Escape" -or $lastKeyInfo.VirtualKeyCode -eq 27)))
 						if ($shouldProcessEscape) {
 							$lastKeyPress = $null
@@ -2296,36 +1150,16 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 								Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 								break
 							}
-							if ($quitResult.Result -eq $true) {
-								if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'quit' } } catch {} }
-								Clear-Host
-								$runtime = (Get-Date) - $ScriptStartTime
-								$hours = [math]::Floor($runtime.TotalHours)
-								$minutes = $runtime.Minutes
-								$seconds = $runtime.Seconds
-								$runtimeStr = ""
-								if ($hours -gt 0) {
-									$runtimeStr = "$hours hour$(if ($hours -ne 1) { 's' }), $minutes minute$(if ($minutes -ne 1) { 's' })"
-								} elseif ($minutes -gt 0) {
-									$runtimeStr = "$minutes minute$(if ($minutes -ne 1) { 's' }), $seconds second$(if ($seconds -ne 1) { 's' })"
-								} else {
-									$runtimeStr = "$seconds second$(if ($seconds -ne 1) { 's' })"
-								}
-								Write-Host ""
-								$mouseEmoji = [char]::ConvertFromUtf32(0x1F400)
-								Write-Host "  mJig($mouseEmoji) " -NoNewline -ForegroundColor $script:HeaderAppName
-								Write-Host "Stopped" -ForegroundColor $script:TextError
-								Write-Host ""
-								Write-Host "  Runtime: " -NoNewline -ForegroundColor $script:TextMuted
-								Write-Host $runtimeStr -ForegroundColor $script:TextDefault
-								Write-Host ""
+						if ($quitResult.Result -eq $true) {
+							if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'quit' } } catch {} }
+							Write-StoppedMessage -ScriptStartTime $ScriptStartTime
 							break process
-						} else {
-							if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = $null } } catch {} }
-							Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
-							break
-						}
-					} elseif ($lastKeyPress -eq "q") {
+					} else {
+						if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = $null } } catch {} }
+						Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
+						break
+					}
+				} elseif ($lastKeyPress -eq "q") {
 							$lastKeyPress = $null
 							$lastKeyInfo = $null
 							
@@ -2343,42 +1177,17 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 								Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 								break
 							}
-								if ($quitResult.Result -eq $true) {
-									if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'quit' } } catch {} }
-								if ($DebugMode) {
-									Add-DebugLogEntry -LogArray $LogArray -Date $date -Message "Quit confirmed"
-								}
-									Clear-Host
-									$runtime = (Get-Date) - $ScriptStartTime
-									$hours = [math]::Floor($runtime.TotalHours)
-									$minutes = $runtime.Minutes
-									$seconds = $runtime.Seconds
-									$runtimeStr = ""
-									if ($hours -gt 0) {
-										$runtimeStr = "$hours hour$(if ($hours -ne 1) { 's' }), $minutes minute$(if ($minutes -ne 1) { 's' })"
-									} elseif ($minutes -gt 0) {
-										$runtimeStr = "$minutes minute$(if ($minutes -ne 1) { 's' }), $seconds second$(if ($seconds -ne 1) { 's' })"
-									} else {
-										$runtimeStr = "$seconds second$(if ($seconds -ne 1) { 's' })"
-									}
-									Write-Host ""
-									$mouseEmoji = [char]::ConvertFromUtf32(0x1F400)
-									Write-Host "  mJig(" -NoNewline -ForegroundColor $script:HeaderAppName
-									$mouseEmojiX = $Host.UI.RawUI.CursorPosition.X
-									$mouseEmojiY = $Host.UI.RawUI.CursorPosition.Y
-									Write-Host $mouseEmoji -NoNewline -ForegroundColor $script:HeaderIcon
-									[Console]::SetCursorPosition($mouseEmojiX + 2, $mouseEmojiY)
-									Write-Host ") " -NoNewline -ForegroundColor $script:HeaderAppName
-									Write-Host "Stopped" -ForegroundColor $script:TextError
-									Write-Host ""
-								Write-Host "  Runtime: " -NoNewline -ForegroundColor $script:TextMuted
-								Write-Host $runtimeStr -ForegroundColor $script:TextDefault
-									Write-Host ""
-									break process
-							} else {
+							if ($quitResult.Result -eq $true) {
+								if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'quit' } } catch {} }
 							if ($DebugMode) {
-								Add-DebugLogEntry -LogArray $LogArray -Date $date -Message "Quit canceled"
+								Add-DebugLogEntry -LogArray $LogArray -Date $date -Message "Quit confirmed"
 							}
+								Write-StoppedMessage -ScriptStartTime $ScriptStartTime
+								break process
+						} else {
+						if ($DebugMode) {
+							Add-DebugLogEntry -LogArray $LogArray -Date $date -Message "Quit canceled"
+						}
 								if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = $null } } catch {} }
 								Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 								break
@@ -2404,6 +1213,60 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 					}
 						Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
 						break
+		} elseif ($lastKeyPress -eq "d") {
+			$lastKeyPress = $null
+			$lastKeyInfo  = $null
+			if (-not $script:DisplaySleepMode) {
+				# Show settings+confirmation dialog only when triggered by menu button click
+				$doSleep = -not $_menuTriggeredByClick
+				if ($_menuTriggeredByClick) {
+					$HostWidthRef  = [ref]$HostWidth;  $HostHeightRef = [ref]$HostHeight
+					$dlgResult = Show-DisplaySleepDialog -HostWidthRef $HostWidthRef -HostHeightRef $HostHeightRef
+					$HostWidth  = $HostWidthRef.Value;  $HostHeight  = $HostHeightRef.Value
+					if ($dlgResult.NeedsRedraw) {
+						Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
+					}
+					# Sync updated settings to worker; restart idle clock so Apply does not sleep immediately
+					$script:_DisplaySleepLastInputTime = Get-Date
+					if ($_isViewerMode) {
+						try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleepSettings'; audioEnabled = $script:DisplaySleepAudioEnabled; autoEnabled = $script:DisplaySleepAutoEnabled; autoTimeoutSecs = $script:DisplaySleepAutoTimeoutSecs } } catch {}
+					}
+					$doSleep = ($dlgResult.Action -eq 'sleep')
+				}
+				if ($doSleep) {
+					Start-Sleep -Milliseconds 500
+					$null = Invoke-DisplaySleep -Action Sleep
+					$script:DisplaySleepMode        = $true
+					$script:DisplaySleepActivatedAt = Get-Date
+					$script:DisplaySleepPrePos      = Get-MousePosition
+					if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleep'; active = $true } } catch {} }
+					if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
+					$null = $LogArray.Add([PSCustomObject]@{
+						logRow = $true
+						components = @(
+							@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
+							@{ priority = 2; text = " - Display sleep activated"; shortText = " - Display sleep on" }
+						)
+					})
+				}
+			} else {
+				if (Invoke-DisplaySleep -Action Wake) {
+					$script:DisplaySleepMode = $false
+					$script:DisplaySleepActivatedAt = $null
+					$script:_DisplaySleepLastInputTime = Get-Date
+					if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleep'; active = $false } } catch {} }
+					if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
+					$null = $LogArray.Add([PSCustomObject]@{
+						logRow = $true
+						components = @(
+							@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
+							@{ priority = 2; text = " - Display wake confirmed"; shortText = " - Display wake ok" }
+						)
+					})
+					Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
+				}
+			}
+			break
 				} elseif ($lastKeyPress -eq "s") {
 					$lastKeyPress = $null
 					$lastKeyInfo  = $null
@@ -2770,57 +1633,16 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 			# Check if this is the first run (before we modify lastMovementTime)
 			$isFirstRun = ($null -eq $LastMovementTime)
 			
-		if (-not $_isViewerMode) {
-			# Wait for mouse to stop moving before proceeding
-			# This prevents stutter by ensuring the mouse is settled before we do expensive operations
-			# Only do this if we actually waited (not on first run or force redraw)
-			if (-not $isFirstRun -and -not $forceRedraw) {
-				$mouseSettleMs = 150  # Must be still for this long
-				$lastSettleCheckPos = Get-MousePosition
-				$mouseSettledTime = $null
-				$settleLoopCount = 0
-				$maxMoveDelta = 0
-				
-				if ($script:DiagEnabled) {
-					"$(Get-Date -Format 'HH:mm:ss.fff') - Loop $($script:LoopIteration): Starting settle wait, pos: $($lastSettleCheckPos.X),$($lastSettleCheckPos.Y)" | Out-File $script:SettleDiagFile -Append
-				}
-				
-				while ($true) {
-					$settleLoopCount++
-					Start-Sleep -Milliseconds 25
-					$currentSettlePos = Get-MousePosition
-					
-					$mouseMoved = $false
-					if ($null -ne $currentSettlePos -and $null -ne $lastSettleCheckPos) {
-						$deltaX = [Math]::Abs($currentSettlePos.X - $lastSettleCheckPos.X)
-						$deltaY = [Math]::Abs($currentSettlePos.Y - $lastSettleCheckPos.Y)
-						$moveDelta = [Math]::Max($deltaX, $deltaY)
-						if ($moveDelta -gt $maxMoveDelta) { $maxMoveDelta = $moveDelta }
-						if ($deltaX -gt 2 -or $deltaY -gt 2) {
-							$mouseMoved = $true
-						}
-					}
-					$lastSettleCheckPos = $currentSettlePos
-					
-					if ($mouseMoved) {
-						$mouseSettledTime = $null
-					} else {
-						if ($null -eq $mouseSettledTime) {
-							$mouseSettledTime = Get-Date
-						} elseif (((Get-Date) - $mouseSettledTime).TotalMilliseconds -ge $mouseSettleMs) {
-							if ($script:DiagEnabled) {
-								"$(Get-Date -Format 'HH:mm:ss.fff') - Loop $($script:LoopIteration): Settled after $settleLoopCount checks, max delta: $maxMoveDelta" | Out-File $script:SettleDiagFile -Append
-							}
-							break
-						}
-					}
-				}
-			}
+	if (-not $_isViewerMode) {
+		# Wait for mouse to stop moving before proceeding (skip on first run or force redraw)
+		if (-not $isFirstRun -and -not $forceRedraw) {
+			Wait-MouseSettle
+		}
 			
-			# Determine if we should skip the update based on user input or first run
-			if ($script:userInputDetected) {
-				$SkipUpdate = $true
-			} elseif ($isFirstRun) {
+		# Determine if we should skip the update based on user input or first run
+		if ($script:userInputDetected) {
+			$SkipUpdate = $true
+		} elseif ($isFirstRun) {
 				# Skip automated input on first run
 				$SkipUpdate = $true
 			} elseif (-not $forceRedraw) {
@@ -2828,9 +1650,34 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 				$SkipUpdate = $false
 			}
 		} # end if (-not $_isViewerMode) — mouse settle + skip determination
+
+		# Recurring idle clock for auto display sleep (viewer + inline)
+		if ($script:userInputDetected) {
+			$script:_DisplaySleepLastInputTime = Get-Date
+		}
 			
-			# Prepare UI dimensions
-			$oldRows = $Rows
+		# Auto-sleep: while enabled, re-sleep whenever idle timeout elapses and display is awake
+		if ($script:DisplaySleepAutoEnabled -and -not $script:DisplaySleepMode) {
+			$_idleSecs = ((Get-Date) - $script:_DisplaySleepLastInputTime).TotalSeconds
+			if ($_idleSecs -ge $script:DisplaySleepAutoTimeoutSecs) {
+				$null = Invoke-DisplaySleep -Action Sleep
+				$script:DisplaySleepMode        = $true
+				$script:DisplaySleepActivatedAt = Get-Date
+				$script:DisplaySleepPrePos      = Get-MousePosition
+				if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleep'; active = $true } } catch {} }
+				if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
+				$null = $LogArray.Add([PSCustomObject]@{
+					logRow = $true
+					components = @(
+						@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
+						@{ priority = 2; text = " - Auto display sleep activated"; shortText = " - Auto sleep" }
+					)
+				})
+			}
+		}
+
+		# Prepare UI dimensions
+		$oldRows = $Rows
 			$bpV  = [math]::Max(1, $script:BorderPadV)
 	# Visible log rows: total height minus 4 chrome rows minus 2*padding rows
 	$Rows = [math]::Max(1, $HostHeight - 4 - 2 * $bpV)
@@ -3359,18 +2206,10 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 					Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 					Write-MainFrame -Force:$true -Date $date -NoFlush
 					Flush-Buffer -ClearFirst
-				} elseif ($quitResult.Result -eq $true) {
-					if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'quit' } } catch {} }
-					Clear-Host
-					$runtime = (Get-Date) - $ScriptStartTime
-					$hours = [math]::Floor($runtime.TotalHours); $minutes = $runtime.Minutes; $seconds = $runtime.Seconds
-					$runtimeStr = if ($hours -gt 0) { "$hours hour$(if ($hours -ne 1) { 's' }), $minutes minute$(if ($minutes -ne 1) { 's' })" } elseif ($minutes -gt 0) { "$minutes minute$(if ($minutes -ne 1) { 's' }), $seconds second$(if ($seconds -ne 1) { 's' })" } else { "$seconds second$(if ($seconds -ne 1) { 's' })" }
-					Write-Host ""; $mouseEmoji = [char]::ConvertFromUtf32(0x1F400)
-					Write-Host "  mJig($mouseEmoji) " -NoNewline -ForegroundColor $script:HeaderAppName
-					Write-Host "Stopped" -ForegroundColor $script:TextError
-				Write-Host ""; Write-Host "  Runtime: " -NoNewline -ForegroundColor $script:TextMuted
-				Write-Host $runtimeStr -ForegroundColor $script:TextDefault; Write-Host ""
-					break process
+			} elseif ($quitResult.Result -eq $true) {
+				if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'quit' } } catch {} }
+				Write-StoppedMessage -ScriptStartTime $ScriptStartTime
+				break process
 				} else {
 					Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 				}
@@ -3478,6 +2317,7 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 		} # end main loop
 
 	# Normal exit cleanup (only reached via break process — not on Ctrl+C)
+	if ($script:DisplaySleepMode) { $null = Invoke-DisplaySleep -Action Wake; $script:DisplaySleepMode = $false }
 	Remove-Notification
 
 	if ($_isViewerMode) {
@@ -3497,6 +2337,7 @@ public static extern IntPtr GetStdHandle(int nStdHandle);
 	} finally {
 		# Runs on ALL exits including Ctrl+C (PipelineStoppedException).
 		# Dispose() on already-disposed objects is a safe no-op via try/catch.
+		if ($script:DisplaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $script:DisplaySleepMode = $false }
 		if ($_isViewerMode) {
 			if ($null -ne $_viewerPipeReader) { try { $_viewerPipeReader.Dispose() } catch {} }
 			if ($null -ne $_viewerPipeWriter) { try { $_viewerPipeWriter.Dispose() } catch {} }

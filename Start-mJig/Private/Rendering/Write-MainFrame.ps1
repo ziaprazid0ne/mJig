@@ -831,11 +831,14 @@
 		if ($_bpH -gt 1) { Write-Buffer -X ($HostWidth-$_bpH+1) -Y $Outputline -Text (" " * ($_bpH - 1)) }  # transparent right outer
 			$outputLine++
 
-			## Menu Options ##
+		## Menu Options ##
 	$emojiLock    = $script:LockEmoji
 	$emojiGear    = $script:GearEmoji
 	$emojiRedX    = $script:RedXEmoji
-			
+	$emojiZzz     = [char]::ConvertFromUtf32(0x1F4A4)  # 💤
+	$emojiMoon    = [char]::ConvertFromUtf32(0x1F311)  # 🌑
+	$emojiDisplayIcon = @($emojiZzz, $emojiMoon)[$script:DisplaySleepMode -as [int]]
+		
 	$menuItemsList = @(
 		@{
 			full             = "$emojiGear|(S)ettings"
@@ -849,6 +852,11 @@
 			short   = "(I)nc"
 		}
 	)
+	$menuItemsList += @{
+		full    = "$emojiDisplayIcon|(d)isplay"
+		noIcons = "(d)isplay"
+		short   = "(d)dsp"
+	}
 
 		$menuItemsList += @{
 			full    = "$emojiRedX|(Q)uit"
