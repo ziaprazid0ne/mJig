@@ -35,7 +35,7 @@ The module is a multi-file PowerShell module implementing a console-based TUI mo
 
 ### Multi-File Structure
 
-The codebase is split across ~48 files under `Start-mJig/Private/`. The skeleton `Start-mJig.psm1` (~2,345 lines) contains the `Start-mJig` function entry point, parameter block, a thin provisioner call (delegates to `Invoke-ModuleRunspaceProvisioner.ps1`), variable initialization, and the main loop. All helper functions and large config sections are dot-sourced from individual `.ps1` files **inside** the `Start-mJig` function body, preserving PowerShell's scope chain so nested functions can access `$script:` and parent-scope variables without refactoring.
+The codebase is split across ~79 files under `Start-mJig/Private/`. The skeleton `Start-mJig.psm1` (~2,345 lines) contains the `Start-mJig` function entry point, parameter block, a thin provisioner call (delegates to `Invoke-ModuleRunspaceProvisioner.ps1`), variable initialization, and the main loop. All helper functions and large config sections are dot-sourced from individual `.ps1` files **inside** the `Start-mJig` function body, preserving PowerShell's scope chain so nested functions can access `$script:` and parent-scope variables without refactoring.
 
 **Build pipeline:** `Start-mJig/Build/Build-Module.ps1` recombines all dot-sourced files into a single monolithic `.psm1` in `dist/`. GitHub Actions (`.github/workflows/build.yml`) runs this on `v*` tag push and creates a release. The `dist/` folder is git-ignored.
 
@@ -166,7 +166,7 @@ Start-mJig/
 │       ├── . Private\Helpers\Initialize-MousePosition.ps1
 │       ├── . Private\Helpers\Get-SmoothMovementPath.ps1
 │       ├── . Private\Helpers\Get-DirectionArrow.ps1
-│       ├── . Private\Rendering\*.ps1           (11 files)
+│       ├── . Private\Rendering\*.ps1           (14 files)
 │       ├── . Private\Dialogs\Show-TimeChangeDialog.ps1
 │       ├── . Private\Helpers\Restore-ConsoleInputMode.ps1
 │       ├── . Private\Helpers\Send-ConsoleWakeKey.ps1
@@ -174,7 +174,7 @@ Start-mJig/
 │       ├── . Private\Rendering\Write-ResizeLogo.ps1
 │       ├── . Private\Rendering\Write-MainFrame.ps1
 │       ├── . Private\Helpers\*.ps1             (remaining helpers incl. Write-StoppedMessage, Wait-MouseSettle)
-│       ├── . Private\IPC\*.ps1                 (9 files incl. Update-ViewerPipeState.ps1, Start-BackgroundWorker.ps1)
+│       ├── . Private\IPC\*.ps1                 (11 files incl. Update-ViewerPipeState.ps1, Start-BackgroundWorker.ps1, Send-ViewerMessage.ps1)
 │       ├── . Private\Startup\Wait-DebugModeKeyPress.ps1
 │       ├── . Private\Helpers\Get-Padding.ps1
 │       ├── . Private\Rendering\Write-Section*.ps1 + Write-SimpleField*.ps1
@@ -210,15 +210,17 @@ Start-mJig/
 │   │   ├── Write-Buffer.ps1                    Queue positioned, colored text segments
 │   │   ├── Flush-Buffer.ps1                    Build VT100 string + atomic [Console]::Write()
 │   │   ├── Clear-Buffer.ps1                    Discard queued segments
-│   │   ├── Write-MenuButton.ps1           Instant button redraw (click feedback)
-│   │   ├── Write-HotkeyLabel.ps1              Hotkey-parsed label renderer (split + highlight)
-│   │   ├── Write-DialogShadow.ps1               Offset shadow effect
+│   │   ├── Write-MenuButton.ps1                Instant button redraw (click feedback)
+│   │   ├── Write-HotkeyLabel.ps1               Hotkey-parsed label renderer (split + highlight)
+│   │   ├── Write-DialogShadow.ps1              Offset shadow effect
 │   │   ├── Clear-DialogShadow.ps1              Remove shadow
-│   │   ├── Write-ResizeLogo.ps1                 Resize splash logo
-│   │   ├── Write-MainFrame.ps1                  Full main UI renderer (~940 lines)
+│   │   ├── Write-ResizeLogo.ps1                Resize splash logo
+│   │   ├── Write-MainFrame.ps1                 Full main UI renderer (~1298 lines); geometry cached in $script:_FrameLayout
 │   │   ├── Write-SectionLine.ps1               Section divider row
 │   │   ├── Write-SimpleDialogRow.ps1           Dialog content row
-│   │   └── Write-SimpleFieldRow.ps1            Dialog input field row
+│   │   ├── Write-SimpleFieldRow.ps1            Dialog input field row
+│   │   ├── Write-DialogButton.ps1              Dialog button renderer (icon/sep/brackets/hotkey/BG); returns rendered width
+│   │   └── Write-DialogFrame.ps1              Dialog frame builder (top border / title / divider / bottom border)
 │   ├── Dialogs/
 │   │   ├── Show-TimeChangeDialog.ps1           End time editor (~680 lines)
 │   │   ├── Show-MovementModifyDialog.ps1       Movement parameter editor (~765 lines)
@@ -232,6 +234,7 @@ Start-mJig/
 │   │   ├── Send-PipeMessage.ps1                Synchronous JSON-line write
 │   │   ├── Read-PipeMessage.ps1                Async ReadLineAsync reader
 │   │   ├── Send-PipeMessageNonBlocking.ps1     FlushAsync writer (skips on backpressure)
+│   │   ├── Send-ViewerMessage.ps1              Guard + try/catch wrapper for viewer → worker sends; the only permitted call site for viewer IPC sends
 │   │   ├── Start-WorkerLoop.ps1                Headless IPC server + jiggling loop (~500 lines)
 │   │   ├── Connect-WorkerPipe.ps1              Pipe connection + welcome handshake
 │   │   ├── Invoke-ViewerFocusWindow.ps1        Bring viewer terminal to foreground (tray Open action handler)
@@ -247,22 +250,27 @@ Start-mJig/
 │       ├── Get-CachedMethod.ps1                Reflection method cache
 │       ├── Get-MousePosition.ps1               Cursor position via GetCursorPos
 │       ├── Test-MouseMoved.ps1                 Position change detection
+│       ├── Test-UserInputActivity.ps1          LII + automation filter classifier; returns @{ ActivityDetected; MouseMoved }
+│       ├── Register-UserInput.ps1              Single write point for input flags, activity clock, AutoResume timestamp
 │       ├── Get-TimeSinceMs.ps1                 Millisecond elapsed time
 │       ├── Get-VariedValue.ps1                 Random variance helper
 │       ├── Set-CoordinateBounds.ps1            Click region bounds helper
 │       ├── Get-Padding.ps1                     Padding string generator
 │       ├── Initialize-MousePosition.ps1        Initial $LastPos capture via GetCursorPos; debug logging + graceful fallback
 │       ├── Invoke-ResizeHandler.ps1            Blocking resize handler
+│       ├── Invoke-DialogResize.ps1             Dialog resize wrapper (ResizeHandler → refs → MainFrame → callback → redraw → Flush)
 │       ├── Restore-ConsoleInputMode.ps1        Re-enable ENABLE_MOUSE_INPUT
 │       ├── Send-ConsoleWakeKey.ps1             Inject VK_RMENU wake event
 │       ├── Show-DiagnosticFiles.ps1            Post-exit diag file dump (countdown prompt)
 │       ├── Add-DebugLogEntry.ps1               Standardized debug log entry creation
+│       ├── Add-LogEntry.ps1                    Ring-buffer log append helper (evict oldest + append)
 │       ├── Get-DialogButtonLayout.ps1          Dialog button width calculations
 │       ├── Get-DialogMouseClick.ps1            Dialog mouse click detection via PeekConsoleInput
 │       ├── Read-DialogKeyInput.ps1             Dialog key-up event reader
 │       ├── Invoke-DialogCleanup.ps1            Dialog close cleanup (shadow, area, cursor, state)
 │       ├── Reset-PostDialogState.ps1           Post-dialog redraw flag setup (no clear-host; see §3a)
 │       ├── Invoke-CursorMovement.ps1           Shared cursor animation loop with drift detection
+│       ├── Invoke-GlobalHotkeyAction.ps1       Shared pause/sleep/quit handler for worker and inline paths
 │       ├── Invoke-DisplaySleep.ps1             DDC/CI display sleep/wake with fresh-handle enumeration and audio cues
 │       ├── Show-Notification.ps1               Windows toast notification via NotifyIcon + Remove-Notification
 │       ├── Test-GlobalHotkey.ps1               Global hotkey polling (Shift+M+P/Q/D/S) via GetAsyncKeyState
@@ -312,6 +320,7 @@ These can be modified at runtime via the Modify Movement dialog. When accessing 
 - `$script:PendingDialogCheck` - `$true` after a confirmed click; render loop clears it on the first execution after the action, immediately restoring the button color unless a dialog is open
 - `$script:LButtonWasDown` - Tracks previous LMB state from console `PeekConsoleInput` events for UP-transition detection
 - `$script:RenderQueue` - `System.Collections.Generic.List[hashtable]` used by buffered rendering (`Write-Buffer`/`Flush-Buffer`)
+- `$script:_FrameLayout` - `[hashtable]` cached `Write-MainFrame` geometry (log width, stats box visibility, menu item list, format widths, menu format, quit button width). Keyed by invalidation stamp `"$HostWidth|$HostHeight|$Output|$CurrentThemeName|$TitlePresetIndex|$DisplaySleepMode|$DebugMode"`. `$null` until first render.
 - `$script:ESC` - `[char]27` for VT100 escape sequences
 - `$script:CursorVisible` - Boolean tracking cursor visibility state for VT100 sequences
 - `$script:AnsiFG` / `$script:AnsiBG` - ConsoleColor-to-ANSI SGR code lookup hashtables
@@ -1308,13 +1317,12 @@ for ($i = 1; $i -lt $movementPoints.Count; $i++) {
 **Script-scoped variables:**
 - `$script:ManualPause` — `[bool]` manual pause flag (standalone/viewer)
 - `$script:_HotkeyDebounce` — `[bool]` prevents repeated hotkey firing
-- `$script:DisplaySleepMode` — `[bool]` true when display sleep is active; cleared only after `Invoke-DisplaySleep -Action Wake` returns `$true` (or after a successful `Verify` / worker sync)
+- `$script:DisplaySleepMode` — `[bool]` true when display sleep is active; cleared only after `Invoke-DisplaySleep -Action Wake` returns `$true` (or after a worker sync)
 - `$script:DisplaySleepAudioEnabled` — `[bool]` controls audio cues for sleep/wake events (default `$true`); toggled by `u` in `Show-DisplaySleepDialog`
 - `$script:DisplaySleepAutoEnabled` — `[bool]` recurring auto-sleep policy (default `$false`); when `$true`, the display re-sleeps whenever real user idle time reaches `$script:DisplaySleepAutoTimeoutSecs`. Toggled by `t` (`(t)imed sleep`) in `Show-DisplaySleepDialog`
 - `$script:DisplaySleepAutoTimeoutSecs` — `[int]` idle seconds before auto-sleep fires again (default `60`); edited in the Timeout field of `Show-DisplaySleepDialog`
-- `$script:_DisplaySleepLastInputTime` — `[datetime]` last real user activity used by the recurring auto-sleep idle clock. Updated on: local `userInputDetected`, successful wake (keyboard/click/`$mouseInputDetected`/Verify / hotkey / menu), dialog Apply/Sleep settings commit, and viewer-side worker `userInputDetected` / wake sync. **Not** updated by mJig automated cursor movement or simulated keypresses
+- `$script:LastUserActivityTime` — `[datetime]` unified "last real user activity" clock (main module / viewer). Written only by `Register-UserInput` and wake-success paths. Auto-sleep idle time and cooldown remaining are derived from this single clock. Do not create parallel clocks (`$LastUserInputTime`, `$_DisplaySleepLastInputTime`, etc.) for the same meaning.
 - `$script:DisplaySleepActivatedAt` — `[datetime]` timestamp set when sleep is activated; `$null` when not sleeping. Used to enforce a 1.5 s grace window so that the keypress or click that triggered sleep does not immediately re-wake the display.
-- `$script:DisplaySleepPrePos` — `[POINT]` mouse cursor position captured at sleep activation time; used as the reference for `Test-MouseMoved` in the wake check so that only genuine post-sleep movement (>5 px) counts.
 - `$script:DisplayAPI` — runtime type reference for the `DisplayControl` class (DDC/CI P/Invoke wrappers in `dxva2.dll`)
 - `$script:PhysicalMonitorType` — string type name for `New-Object` to create `PHYSICAL_MONITOR` structs
 - `$script:_NotifyIcon` — `[System.Windows.Forms.NotifyIcon]` lazily created on worker only, disposed on exit
@@ -1330,6 +1338,47 @@ for ($i = 1; $i -lt $movementPoints.Count; $i++) {
 - `$script:_Tier1NotifyFailed` — `$true` if the native COM `ShowToast` call (Tier 1) has ever thrown an uncaught exception; causes all subsequent calls to skip Tier 1 and go directly to Tier 2. Set as a pre-call guard before `ShowToast`, cleared to `$false` on success, and set as a backstop in both the Show-Notification outer catch and the tray toggle handler's catch.
 - `$script:PauseEmoji` / `$script:PlayEmoji` — cached ⏸/▶ characters (avoid recomputation)
 - `$script:ModeLabelBounds` — click region for "Full"/"Min" label
+
+---
+
+## Signal Reuse — Do Not Re-Detect What You Already Know
+
+### The canonical anti-pattern
+
+Display wake needed "did the user move the mouse?" That answer **already existed** as `$mouseInputDetected` (the interval-skip flag). Hours of iteration instead invented parallel classifiers (`GetLastInputInfo` wake, `SC_MONITORPOWER=2`, `DisplaySleepPrePos` drift check) that fought the automation filter and each other — until the existing flag was reused and the feature worked immediately.
+
+Wrong path: new feature → new sensor. Right path: new feature → **which existing signal already answers this?**
+
+This applies equally to *calculations*: if a timestamp, mouse position, or layout width was computed this tick, pass it — do not call `Get-Date` / `Get-MousePosition` / layout math again.
+
+### Rules (all hard requirements)
+
+**1. Enumerate existing signals before adding detection.**
+
+Canonical signal surface:
+- `$mouseInputDetected` — real user mouse this interval (automation filtered via `recentAutoMove`)
+- `$keyboardInputDetected` — keyboard activity this interval
+- `$script:userInputDetected` — any real user input this interval
+- `$scrollDetectedInInterval` — scroll wheel this interval
+- `$SkipUpdate` — worker says to skip this movement cycle
+- `$cooldownActive` / `$secondsRemaining` — auto-resume cooldown state
+- IPC `state` fields: `mouseInputDetected`, `keyboardInputDetected`, `userInputDetected`, `cooldownActive`
+- Stats counters (`$script:Stats*`) — cumulative, already maintained
+
+**2. Prefer consumers over producers.** Wire policy/UI to existing signals. Never add a second classifier for the same physical meaning.
+
+**3. One timestamp per meaning.** One "last real user activity" clock per process. Features derive from it; they do not keep private twins. Canonical clocks: `$script:LastUserActivityTime` (main module / viewer) and `$_dsLastInputTime` (worker-local mirror).
+
+**4. Derive, do not remeasure.** `$date` is fresh every 50ms tick — reuse it. Mouse position already read in the tick — share `$currentCheckPos`. Cooldown already computed — read `$cooldownActive`.
+
+**5. Three-strikes boilerplate rule.** The third copy of any block must become a `Private/` helper: log ring-buffer append → `Add-LogEntry`; viewer IPC send guard → `Send-ViewerMessage`; dialog resize → `Invoke-DialogResize`; dialog buttons → `Write-DialogButton`; dialog borders → `Write-DialogFrame`.
+
+### Shared input helpers
+
+- **`Register-UserInput`** (`Private/Helpers/Register-UserInput.ps1`) — the **only** permitted writer of `$mouseInputDetected`, `$keyboardInputDetected`, `$script:userInputDetected`, `$script:LastUserActivityTime`, and the AutoResume timestamp. Takes `-Source Mouse|Keyboard|Scroll|Click -Date $date`.
+- **`Test-UserInputActivity`** (`Private/Helpers/Test-UserInputActivity.ps1`) — LII + `recentSimulated`/`recentAutoMove` filter math. Returns `@{ ActivityDetected; MouseMoved }`. Replaces the three former inline copies (worker, wait-loop, post-wait).
+
+See `.cursor/rules/signal-reuse.mdc` for the full checklist.
 
 ---
 
@@ -1547,6 +1596,74 @@ $null = $LogArray.Add([PSCustomObject]@{
 
 No guard is needed. The render loop trims `$LogArray` to `$Rows` entries before each frame.
 
+### Optional `[ref]` Parameters Must Not Have a `[ref]` Type Annotation (CRITICAL)
+
+Declaring an optional `[ref]` parameter with a `$null` default — `[ref]$Param = $null` — causes PowerShell's parameter binder to throw `ParameterBindingArgumentTransformationException` every time a caller omits that parameter. PowerShell tries to coerce the default `$null` to the `[ref]` type and fails.
+
+**Wrong:**
+
+```powershell
+param(
+    [ref]$UserInputDetectedRef = $null,  # CRASHES when caller omits this arg
+    [ref]$MouseDetectedRef     = $null
+)
+```
+
+**Correct — no type annotation on optional ref parameters:**
+
+```powershell
+param(
+    $UserInputDetectedRef = $null,
+    $MouseDetectedRef     = $null
+)
+```
+
+The callers still pass `([ref]$var)` PSReference objects. Without the `[ref]` type annotation, PowerShell accepts the PSReference as-is (no coercion) and `$null` as the default (also no coercion). The `$null -ne $Param` guard inside the function body is unchanged. This is the standard PowerShell pattern for optional ref parameters.
+
+Mandatory `[ref]` parameters (no default) are fine because the caller is always required to pass a PSReference: `[ref]$ManualPauseRef` with no `= $null`.
+
+### `[string]` Type Annotation Coerces `$null` to `""` — Use Untyped Optional Parameters for Color/Object Args (CRITICAL)
+
+Declaring an optional parameter as `[string]$Param = $null` causes PowerShell to coerce any `$null` passed by a caller to an empty string `""`. This silently breaks downstream code that checks `$null -ne $Param` or attempts a type cast on the value.
+
+**Concrete failure chain:**
+
+```powershell
+# Write-DialogButton declares:
+[string]$EmojiColor = $null   # caller passes $null → becomes ""
+
+# Write-Buffer then evaluates:
+$fgCode = if ($null -ne $FG) { $script:AnsiFG[[ConsoleColor]$FG] } else { 39 }
+# $null -ne "" is TRUE, so [ConsoleColor]"" is attempted → InvalidCastException
+```
+
+The exception propagates uncaught through nested scriptblock invocations, terminating the entire viewer script with no visible error message.
+
+**Wrong:**
+
+```powershell
+param(
+    [string]$Emoji      = $null,   # $null passed by caller becomes ""
+    [string]$EmojiColor = $null
+)
+```
+
+**Correct — omit the type annotation for optional nullable color/object args:**
+
+```powershell
+param(
+    $Emoji      = $null,   # stays $null when caller passes $null
+    $EmojiColor = $null
+)
+```
+
+**Defense-in-depth in `Write-Buffer`:** treat empty string FG/BG identically to `$null` (use ANSI default 39/49):
+
+```powershell
+$fgCode = if ($null -ne $FG -and $FG -ne '') { $script:AnsiFG[[ConsoleColor]$FG] } else { 39 }
+$bgCode = if ($null -ne $BG -and $BG -ne '') { $script:AnsiBG[[ConsoleColor]$BG] } else { 49 }
+```
+
 ### `[char]` Arithmetic Is Integer Arithmetic — Always Coerce to `[string]` First (CRITICAL)
 
 In PowerShell, `[char]` is a numeric type. Arithmetic operators on `[char]` produce integers, not strings:
@@ -1698,32 +1815,29 @@ PowerShell cannot unload types once loaded via `Add-Type`. If you modify the C# 
 
 **Wake command**: `SetVCPFeature(hMon, 0xD6, 1)` — MCCS **On**, with `PostMessage(SC_MONITORPOWER=-1)` nudge and multi-attempt retries (~0.7s / 1.2s / 2s / 3s). Success requires fresh-handle `GetVCPFeatureAndVCPFeatureReply(0xD6)` with `currentValue == 1`. API-true `SetVCPFeature` alone is never trusted.
 
-**Always re-enumerate handles**: `GetPhysicalMonitorsFromHMONITOR` returns handles tied to the I2C session. Call `EnumDisplayMonitors` + `GetPhysicalMonitorsFromHMONITOR` fresh on every `Invoke-DisplaySleep` call (Sleep, Wake, and Verify).
+**Always re-enumerate handles**: `GetPhysicalMonitorsFromHMONITOR` returns handles tied to the I2C session. Call `EnumDisplayMonitors` + `GetPhysicalMonitorsFromHMONITOR` fresh on every `Invoke-DisplaySleep` call (Sleep and Wake).
 
 **Do not use `SC_MONITORPOWER=2` during wake.** Putting Windows into "monitors off" makes mJig's own simulated keypress look like user input and spontaneously restores the display.
 
-**Mouse wake uses `$mouseInputDetected`**: The same flag that skips the movement interval (worker: `Test-MouseMoved` with `recentAutoMove` filter; viewer: OR-merged from IPC state; inline: position poll in the wait loop). When that flag is set during display sleep, call `Wake` — do not invent a separate mouse classifier. Raw PrePos cursor drift without `$mouseInputDetected` still uses `Verify` only (power-cycle / already-on). Automated `SetCursorPos` does not set `$mouseInputDetected` on the worker (filtered by `recentAutoMove`).
-
-**`Invoke-DisplaySleep -Action Verify`**: Fresh handles + read VCP 0xD6 with no command. Returns `$true` (success beep) if already on; `$false` silently if still asleep (including automated `SetCursorPos` motion).
+**Mouse wake uses `$mouseInputDetected`**: The same flag that skips the movement interval (worker: `Test-MouseMoved` with `recentAutoMove` filter; viewer: OR-merged from IPC state; inline: position poll in the wait loop). When that flag is set during display sleep, call `Wake` — do not invent a separate mouse classifier. Automated `SetCursorPos` does not set `$mouseInputDetected` on the worker (filtered by `recentAutoMove`), so automated cursor movement never wakes the display.
 
 **Retry-on-input pattern**: `Wake` returns `[bool]`. Caller only clears `$script:DisplaySleepMode` when `$true`. On `$false`, flag stays set and the next keyboard/click/mouse-input retries (short failure beep).
 
-**Wake detection — four triggers**:
+**Wake detection — three triggers** (all reuse existing canonical input signals):
 - **Keyboard KEY-UP** (`$lastKeyPress` non-null, VK 18/165 excluded) → `Invoke-DisplaySleep -Action Wake`
 - **LMB click** (`$script:ConsoleClickCoords` non-null) → `Invoke-DisplaySleep -Action Wake`
-- **User mouse** (`$mouseInputDetected` — same signal as interval skip) → `Invoke-DisplaySleep -Action Wake`
-- **Unclassified PrePos drift** (`Test-MouseMoved` > 5 px from `$script:DisplaySleepPrePos` without `$mouseInputDetected`) → `Verify` only
+- **User mouse** (`$mouseInputDetected` — same signal as interval skip; automation-filtered) → `Invoke-DisplaySleep -Action Wake`
 
-The check runs at the same code location as menu hotkey dispatch (every 200ms ReadKey cycle). Keyboard/click consume `$lastKeyPress` on success so the waking key is not re-dispatched as a hotkey.
+The check runs at the same code location as menu hotkey dispatch (every 200ms ReadKey cycle). Keyboard/click consume `$lastKeyPress` on success so the waking key is not re-dispatched as a hotkey. There is no separate Verify-only branch — `Wake` already reads VCP 0xD6 before issuing the command and handles the power-cycle recovery case.
 
-**Grace window (prevents immediate re-wake)**: When sleep is activated (either via the `d` menu hotkey or `Shift+M+D`/`Shift+M+S` global hotkey), the current timestamp is stored in `$script:DisplaySleepActivatedAt` and the mouse position in `$script:DisplaySleepPrePos`. The wake-detection check skips all input for the first 1500 ms after activation. This prevents the residual KEY_UP or KEY_DOWN event from the key that triggered sleep from immediately re-waking the display.
+**Grace window (prevents immediate re-wake)**: When sleep is activated (either via the `d` menu hotkey or `Shift+M+D`/`Shift+M+S` global hotkey), the current timestamp is stored in `$script:DisplaySleepActivatedAt`. The wake-detection check skips all input for the first 1500 ms after activation. This prevents the residual KEY_UP or KEY_DOWN event from the key that triggered sleep from immediately re-waking the display.
 
 **Menu button icon states**: The `(d)isplay` menu button uses 💤 (U+1F4A4, `$emojiZzz`) as the NORMAL icon (display awake, available to sleep) and 🌑 (U+1F311, `$emojiMoon`) when display sleep is ACTIVE (display off). `$emojiDisplayIcon` is computed in `Write-MainFrame` using `@($emojiZzz, $emojiMoon)[$script:DisplaySleepMode -as [int]]` to avoid brace-confused PSScriptAnalyzer false positives with inline `if` expressions in hash literals.
 
 **Confirmation dialog (menu click only)**: When the `(d)isplay` button is activated by MOUSE CLICK (not by keyboard `d` or global hotkeys), `Show-DisplaySleepDialog` is called before any DDC/CI command fires. The dialog is a centered popup (width 40, height 16) using `SettingsDialog` colors. It describes what DDC/CI sleep IS (direct monitor firmware command, apps remain active) and is NOT (Windows power management — the OS still sees the display as on). Layout: info lines, `(u)audio cues` toggle, `(t)imed sleep` toggle, Timeout field (seconds), and buttons `(s)leep` / `(a)pply` / `(c)ancel`. Sleep commits settings then sleeps immediately; Apply commits settings without sleeping; Cancel reverts. The global hotkeys `Shift+M+D` / `Shift+M+S` bypass this dialog entirely — they are intended for quick toggle when the user already knows the behavior.
 
 **Recurring auto / timed display sleep (NOT a one-shot timer)**: When `$script:DisplaySleepAutoEnabled` is `$true`, mJig continuously re-applies display sleep after every stretch of real user idle time of `$script:DisplaySleepAutoTimeoutSecs` seconds. Cycle: awake + idle ≥ timeout → sleep → real user input wakes → idle clock resets → after another full timeout of no real user input → sleep again. This repeats for the whole session until timed sleep is turned off. Automated cursor movement and simulated keypresses do **not** reset the idle clock and do **not** set `$mouseInputDetected` (so they do not wake). Ownership:
-- **Viewer / Inline connected UI**: main loop owns the idle check and DDC/CI sleep/wake. Updates `$script:_DisplaySleepLastInputTime` on local `userInputDetected`, every successful wake path, and when the display-sleep dialog commits settings. Syncs `displaySleep` / `displaySleepSettings` to the worker.
+- **Viewer / Inline connected UI**: main loop owns the idle check and DDC/CI sleep/wake. Updates `$script:LastUserActivityTime` (via `Register-UserInput`) on local `userInputDetected`, every successful wake path, and when the display-sleep dialog commits settings. Syncs `displaySleep` / `displaySleepSettings` to the worker.
 - **Worker with no viewer** (`-Headless` or viewer disconnected): worker owns the same recurring policy via `$_dsAutoEnabled` / `$_dsAutoTimeoutSecs` / `$_dsLastInputTime`. Settings from a previous viewer are applied via `displaySleepSettings` (also mirrored into `$script:DisplaySleepAutoEnabled` / `$script:DisplaySleepAutoTimeoutSecs`).
 - **Worker with a viewer connected**: viewer owns sleep/wake/auto; worker does not auto-sleep and does not wake (avoids duplicate beeps). Worker still forwards `displaySleepMode` in `state` and may send `displaySleep` for global-hotkey toggles so the viewer UI stays in sync.
 
@@ -1940,27 +2054,35 @@ Functions are in individual `.ps1` files under `Start-mJig/Private/`. The skelet
 | Write-HotkeyLabel | `Private/Rendering/Write-HotkeyLabel.ps1` |
 | Write-DialogShadow / Clear-DialogShadow | `Private/Rendering/` |
 | Write-ResizeLogo | `Private/Rendering/Write-ResizeLogo.ps1` |
-| Write-MainFrame | `Private/Rendering/Write-MainFrame.ps1` |
+| Write-MainFrame | `Private/Rendering/Write-MainFrame.ps1` — layout cached in `$script:_FrameLayout`; invalidated by `HostWidth\|HostHeight\|Output\|theme\|title\|sleep\|debug` stamp |
 | Write-SectionLine / Write-SimpleDialogRow / Write-SimpleFieldRow | `Private/Rendering/` |
+| Write-DialogButton | `Private/Rendering/Write-DialogButton.ps1` — renders one dialog button; returns rendered width for click-bound calculation |
+| Write-DialogFrame | `Private/Rendering/Write-DialogFrame.ps1` — queues top border, title, divider (Y+2), bottom border; `-NoDivider` skips the divider row |
 | Get-MousePosition / Test-MouseMoved | `Private/Helpers/` |
+| Test-UserInputActivity | `Private/Helpers/Test-UserInputActivity.ps1` — LII + filter classifier; returns `@{ ActivityDetected; MouseMoved }` |
+| Register-UserInput | `Private/Helpers/Register-UserInput.ps1` — single write point for `$mouseInputDetected`, `$keyboardInputDetected`, `$script:userInputDetected`, `$script:LastUserActivityTime`, AutoResume timestamp |
 | Get-TimeSinceMs / Get-VariedValue | `Private/Helpers/` |
 | Get-CachedMethod / Set-CoordinateBounds / Get-Padding | `Private/Helpers/` |
 | Restore-ConsoleInputMode / Send-ConsoleWakeKey | `Private/Helpers/` |
 | Disable-PowerShellLogging | `Private/Helpers/Disable-PowerShellLogging.ps1` |
 | Add-DebugLogEntry | `Private/Helpers/Add-DebugLogEntry.ps1` |
+| Add-LogEntry | `Private/Helpers/Add-LogEntry.ps1` — ring-buffer log append; evicts oldest when full |
 | Get-DialogButtonLayout | `Private/Helpers/Get-DialogButtonLayout.ps1` |
 | Get-DialogMouseClick | `Private/Helpers/Get-DialogMouseClick.ps1` |
 | Read-DialogKeyInput | `Private/Helpers/Read-DialogKeyInput.ps1` |
 | Invoke-DialogCleanup | `Private/Helpers/Invoke-DialogCleanup.ps1` |
+| Invoke-DialogResize | `Private/Helpers/Invoke-DialogResize.ps1` — resize wrapper for all 8 dialogs; params: `-HostWidthRef -HostHeightRef -ScreenState -RedrawCallback -ParentRedrawCallback` |
 | Reset-PostDialogState (no clear-host; see §3a) | `Private/Helpers/Reset-PostDialogState.ps1` |
 | Invoke-CursorMovement | `Private/Helpers/Invoke-CursorMovement.ps1` |
-| Invoke-DisplaySleep | `Private/Helpers/Invoke-DisplaySleep.ps1` — `-Action Sleep\|Wake\|Verify`; Sleep uses VCP `0xD6=2` (Standby); Wake uses `0xD6=1` with multi-attempt verify; always re-enumerates handles; returns `[bool]` |
+| Invoke-GlobalHotkeyAction | `Private/Helpers/Invoke-GlobalHotkeyAction.ps1` — shared pause/sleep/quit handler for worker and inline paths |
+| Invoke-DisplaySleep | `Private/Helpers/Invoke-DisplaySleep.ps1` — `-Action Sleep\|Wake`; Sleep uses VCP `0xD6=2` (Standby); Wake uses `0xD6=1` with multi-attempt verify; always re-enumerates handles; returns `[bool]` |
 | Show-Notification / Remove-Notification | `Private/Helpers/Show-Notification.ps1` — `-Body` action string, `-Action` icon selector |
 | Test-GlobalHotkey | `Private/Helpers/Test-GlobalHotkey.ps1` |
 | Wait-MouseSettle | `Private/Helpers/Wait-MouseSettle.ps1` — 25ms-poll settle loop; blocks until mouse stable for 150ms |
 | Write-StoppedMessage / Get-RuntimeString | `Private/Helpers/Write-StoppedMessage.ps1` — "mJig Stopped" exit screen + runtime formatting |
 | Show-DiagnosticFiles | `Private/Helpers/Show-DiagnosticFiles.ps1` |
 | Send-PipeMessage / Read-PipeMessage / Send-PipeMessageNonBlocking | `Private/IPC/` |
+| Send-ViewerMessage | `Private/IPC/Send-ViewerMessage.ps1` — guard + try/catch wrapper for all viewer → worker sends |
 | Start-WorkerLoop | `Private/IPC/Start-WorkerLoop.ps1` |
 | Connect-WorkerPipe | `Private/IPC/Connect-WorkerPipe.ps1` |
 | Invoke-ViewerFocusWindow | `Private/IPC/Invoke-ViewerFocusWindow.ps1` |
@@ -1983,4 +2105,4 @@ Functions are in individual `.ps1` files under `Start-mJig/Private/`. The skelet
 | Main Loop (:process while) | `Start-mJig.psm1` |
 | Build Script | `Build/Build-Module.ps1` |
 
-*Note: All paths are relative to `Start-mJig/`. Last verified: 2026-03-15. Stats box content, `$script:Stats*` tracking variables, curve diagram, theme profile system, and Show-ThemeDialog added 2026-03-15.*
+*Note: All paths are relative to `Start-mJig/`. Last verified: 2026-08-08. Signal Reuse de-duplication pass (WS-A through WS-G) added 2026-08-08: Register-UserInput, Test-UserInputActivity, Add-LogEntry, Send-ViewerMessage, Invoke-GlobalHotkeyAction, Invoke-DialogResize, Write-DialogButton, Write-DialogFrame, $script:_FrameLayout cache, unified $script:LastUserActivityTime clock.*

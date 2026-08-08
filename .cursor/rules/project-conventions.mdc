@@ -38,6 +38,7 @@ The `.cursor/rules/*.mdc` files are distilled from `AGENTS.md` for fast AI conte
 
 If a change doesn't fit an existing rule file, create a new focused `.mdc` file with the appropriate `globs` scope.
 - New naming, terminology, or comment conventions -> `naming-standards.mdc`
+- New signal-reuse violations or additions to the shared-signal surface -> `signal-reuse.mdc`
 
 ## File Placement Rule
 

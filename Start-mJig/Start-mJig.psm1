@@ -113,7 +113,6 @@
 	$LastMovementDurationMs = 0
 	$LastSimulatedKeyPress = $null
 	$LastAutomatedMouseMovement = $null
-	$LastUserInputTime = $null
 
 	# Session identifier derivation + all script-scoped variable initialization
 	. "$PSScriptRoot\Private\Helpers\Get-SessionIdentifier.ps1"
@@ -198,6 +197,8 @@
 		# Instant button redraw for press/release visual feedback
 		. "$PSScriptRoot\Private\Rendering\Write-MenuButton.ps1"
 	. "$PSScriptRoot\Private\Rendering\Write-HotkeyLabel.ps1"
+	. "$PSScriptRoot\Private\Rendering\Write-DialogButton.ps1"
+	. "$PSScriptRoot\Private\Rendering\Write-DialogFrame.ps1"
 
 		# Function to draw drop shadow for dialog boxes
 		. "$PSScriptRoot\Private\Rendering\Write-DialogShadow.ps1"
@@ -205,15 +206,24 @@
 		# Function to clear drop shadow for dialog boxes
 		. "$PSScriptRoot\Private\Rendering\Clear-DialogShadow.ps1"
 
-		# Debug log entry helper (reduces boilerplate for structured log entries)
-		. "$PSScriptRoot\Private\Helpers\Add-DebugLogEntry.ps1"
+	# Debug log entry helper (reduces boilerplate for structured log entries)
+	. "$PSScriptRoot\Private\Helpers\Add-DebugLogEntry.ps1"
+	# Ring-buffer log append helper; uses $Rows capacity to evict oldest entry
+	. "$PSScriptRoot\Private\Helpers\Add-LogEntry.ps1"
 
-		# Post-dialog cleanup helper (set skip/redraw flags + refresh window/buffer sizes)
-		. "$PSScriptRoot\Private\Helpers\Reset-PostDialogState.ps1"
+	# Single-point writer for all user input flags, unified activity clock, and armed flag
+	. "$PSScriptRoot\Private\Helpers\Register-UserInput.ps1"
+
+	# GetLastInputInfo classifier: LII + simulated/automated filter; returns bool
+	. "$PSScriptRoot\Private\Helpers\Test-UserInputActivity.ps1"
+
+	# Post-dialog cleanup helper (set skip/redraw flags + refresh window/buffer sizes)
+	. "$PSScriptRoot\Private\Helpers\Reset-PostDialogState.ps1"
 	. "$PSScriptRoot\Private\Helpers\Invoke-CursorMovement.ps1"
 
 	. "$PSScriptRoot\Private\Helpers\Show-Notification.ps1"
 	. "$PSScriptRoot\Private\Helpers\Test-GlobalHotkey.ps1"
+	. "$PSScriptRoot\Private\Helpers\Invoke-GlobalHotkeyAction.ps1"
 	. "$PSScriptRoot\Private\Helpers\Invoke-DisplaySleep.ps1"
 
 		# Dialog shared helpers (button layout, mouse click detection, key input, exit cleanup)
@@ -221,6 +231,7 @@
 		. "$PSScriptRoot\Private\Helpers\Get-DialogMouseClick.ps1"
 		. "$PSScriptRoot\Private\Helpers\Read-DialogKeyInput.ps1"
 		. "$PSScriptRoot\Private\Helpers\Invoke-DialogCleanup.ps1"
+	. "$PSScriptRoot\Private\Helpers\Invoke-DialogResize.ps1"
 
 		# Function to show popup dialog for changing end time
 		. "$PSScriptRoot\Private\Dialogs\Show-TimeChangeDialog.ps1"
@@ -267,6 +278,8 @@
 		. "$PSScriptRoot\Private\IPC\Read-PipeMessage.ps1"
 		
 		. "$PSScriptRoot\Private\IPC\Send-PipeMessageNonBlocking.ps1"
+	# One-liner viewer send: guards on $_isViewerMode, swallows errors
+	. "$PSScriptRoot\Private\IPC\Send-ViewerMessage.ps1"
 		
 		. "$PSScriptRoot\Private\IPC\Start-WorkerLoop.ps1"
 		
@@ -527,56 +540,15 @@
 	# via its fast 50ms tick loop and forwards state changes via pipe.
 	if (-not $_isViewerMode) {
 		$_globalAction = Test-GlobalHotkey
-		if ($_globalAction -eq 'togglePause') {
-			$script:ManualPause = -not $script:ManualPause
-			if ($script:ManualPause) {
-				Show-Notification -Body "Paused" -Action paused
-			} else {
-				Show-Notification -Body "Resumed" -Action resumed
+		if ($null -ne $_globalAction) {
+			$_hotkeyQuit = Invoke-GlobalHotkeyAction -Action $_globalAction -Source hotkey `
+				-ManualPauseRef ([ref]$script:ManualPause) -DisplaySleepModeRef ([ref]$script:DisplaySleepMode) `
+				-Date $date -LogArray $LogArray -Rows $Rows
+			if ($_hotkeyQuit) {
+				Write-StoppedMessage -ScriptStartTime $ScriptStartTime
+				break process
 			}
-			if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
-			$null = $LogArray.Add([PSCustomObject]@{
-				logRow = $true
-				components = @(
-					@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
-					@{ priority = 2; text = " - $(if ($script:ManualPause) { "$($script:WindowTitle) paused" } else { "$($script:WindowTitle) resumed" }) via hotkey"; shortText = " - $(if ($script:ManualPause) { "$($script:WindowTitle) paused" } else { "$($script:WindowTitle) resumed" })" }
-				)
-			})
-	} elseif ($_globalAction -eq 'toggleDisplaySleep') {
-		if (-not $script:DisplaySleepMode) {
-			Start-Sleep -Milliseconds 500
-			$null = Invoke-DisplaySleep -Action Sleep
-			$script:DisplaySleepMode       = $true
-			$script:DisplaySleepActivatedAt = Get-Date
-			$script:DisplaySleepPrePos      = Get-MousePosition
-				if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
-				$null = $LogArray.Add([PSCustomObject]@{
-					logRow = $true
-					components = @(
-						@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
-						@{ priority = 2; text = " - Display sleep activated via hotkey"; shortText = " - Display sleep on" }
-					)
-				})
-			} else {
-				if (Invoke-DisplaySleep -Action Wake) {
-					$script:DisplaySleepMode = $false
-					$script:DisplaySleepActivatedAt = $null
-					$script:_DisplaySleepLastInputTime = Get-Date
-					if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
-					$null = $LogArray.Add([PSCustomObject]@{
-						logRow = $true
-						components = @(
-							@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
-							@{ priority = 2; text = " - Display wake confirmed via hotkey"; shortText = " - Display wake ok" }
-						)
-					})
-				}
-			}
-	} elseif ($_globalAction -eq 'quit') {
-		Show-Notification -Body "Stopped" -Action quit
-		Write-StoppedMessage -ScriptStartTime $ScriptStartTime
-		break process
-	}
+		}
 	}
 	# ---- End Global Hotkey Polling ------------------------------------------------
 
@@ -711,27 +683,23 @@
 						}
 						try {
 							$currentCheckPos = Get-MousePosition
-							if ($script:DiagEnabled -and $null -ne $currentCheckPos) {
-								$lastX = if ($null -ne $script:lastMousePosCheck) { $script:lastMousePosCheck.X } else { "null" }
-								$lastY = if ($null -ne $script:lastMousePosCheck) { $script:lastMousePosCheck.Y } else { "null" }
-								$moved = Test-MouseMoved -CurrentPos $currentCheckPos -LastPos $script:lastMousePosCheck -Threshold 2
-								"$(Get-Date -Format 'HH:mm:ss.fff') - MOUSEPOS cur=($($currentCheckPos.X),$($currentCheckPos.Y)) last=($lastX,$lastY) moved=$moved" | Out-File $script:InputDiagFile -Append
-							}
-							if ($null -ne $currentCheckPos) {
-								if (Test-MouseMoved -CurrentPos $currentCheckPos -LastPos $script:lastMousePosCheck -Threshold 2) {
-									$script:LastMouseMovementTime = Get-Date
-									$mouseInputDetected = $true
-						$null = $intervalMouseInputs.Add("Mouse")
-								if ($script:AutoResumeDelaySeconds -gt 0) {
-									$LastUserInputTime = Get-Date
-								}
-							}
-							$script:lastMousePosCheck = $currentCheckPos
-							} elseif ($script:DiagEnabled) {
-								"$(Get-Date -Format 'HH:mm:ss.fff') - MOUSEPOS: Get-MousePosition returned NULL" | Out-File $script:InputDiagFile -Append
-							}
-						} catch {
-							if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - MOUSEPOS ERROR: $($_.Exception.Message)" | Out-File $script:InputDiagFile -Append }
+					if ($null -ne $currentCheckPos) {
+						$moved = Test-MouseMoved -CurrentPos $currentCheckPos -LastPos $script:lastMousePosCheck -Threshold 2
+						if ($script:DiagEnabled) {
+							$lastX = if ($null -ne $script:lastMousePosCheck) { $script:lastMousePosCheck.X } else { "null" }
+							$lastY = if ($null -ne $script:lastMousePosCheck) { $script:lastMousePosCheck.Y } else { "null" }
+							"$($date.ToString('HH:mm:ss.fff')) - MOUSEPOS cur=($($currentCheckPos.X),$($currentCheckPos.Y)) last=($lastX,$lastY) moved=$moved" | Out-File $script:InputDiagFile -Append
+						}
+						if ($moved) {
+								Register-UserInput -Source Mouse -Date $date -MouseDetectedRef ([ref]$mouseInputDetected)
+								$null = $intervalMouseInputs.Add("Mouse")
+						}
+						$script:lastMousePosCheck = $currentCheckPos
+						} elseif ($script:DiagEnabled) {
+							"$($date.ToString('HH:mm:ss.fff')) - MOUSEPOS: Get-MousePosition returned NULL" | Out-File $script:InputDiagFile -Append
+						}
+					} catch {
+						if ($script:DiagEnabled) { "$($date.ToString('HH:mm:ss.fff')) - MOUSEPOS ERROR: $($_.Exception.Message)" | Out-File $script:InputDiagFile -Append }
 						}
 					} # end if ($shouldCheckKeyboard) — movement-specific section
 				} # end if (-not $_isViewerMode) — movement-specific per-tick checks
@@ -834,63 +802,38 @@
 								$flushed = [uint32]0
 								$script:MouseAPI::ReadConsoleInput($hStdIn, $_waitPeekBuffer, $consumeCount, [ref]$flushed) | Out-Null
 								}
-								if ($hasScrollEvent) {
-									$scrollDetectedInInterval = $true
+							if ($hasScrollEvent) {
+								$scrollDetectedInInterval = $true
 								$null = $intervalMouseInputs.Add("Scroll/Other")
-									$mouseInputDetected = $true
-									$script:userInputDetected = $true
-									if ($script:AutoResumeDelaySeconds -gt 0) {
-										$LastUserInputTime = Get-Date
-									}
-									if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - PeekConsoleInput: scroll detected (events=$peekEvents)" | Out-File $script:InputDiagFile -Append }
-								}
-								if ($hasKeyboardEvent) {
-									$keyboardInputDetected = $true
-									$_keyboardLocallyDetected = $true
-									$script:userInputDetected = $true
-									if ($script:AutoResumeDelaySeconds -gt 0) {
-										$LastUserInputTime = Get-Date
-									}
-									if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - PeekConsoleInput: keyboard detected (events=$peekEvents)" | Out-File $script:InputDiagFile -Append }
-								}
+								Register-UserInput -Source Scroll -Date $date -UserInputDetectedRef ([ref]$script:userInputDetected) -MouseDetectedRef ([ref]$mouseInputDetected)
+								if ($script:DiagEnabled) { "$($date.ToString('HH:mm:ss.fff')) - PeekConsoleInput: scroll detected (events=$peekEvents)" | Out-File $script:InputDiagFile -Append }
 							}
+						if ($hasKeyboardEvent) {
+							$_keyboardLocallyDetected = $true
+							Register-UserInput -Source Keyboard -Date $date -UserInputDetectedRef ([ref]$script:userInputDetected) -KeyboardDetectedRef ([ref]$keyboardInputDetected)
+							if ($script:DiagEnabled) { "$($date.ToString('HH:mm:ss.fff')) - PeekConsoleInput: keyboard detected (events=$peekEvents)" | Out-File $script:InputDiagFile -Append }
+						}
+					}
 						} catch {
-							if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - PeekConsoleInput ERROR: $($_.Exception.Message)" | Out-File $script:InputDiagFile -Append }
+							if ($script:DiagEnabled) { "$($date.ToString('HH:mm:ss.fff')) - PeekConsoleInput ERROR: $($_.Exception.Message)" | Out-File $script:InputDiagFile -Append }
 						}
 						
 					# System-wide input detection (viewer skips; worker reports via IPC)
-				if (-not $_isViewerMode) {
-					try {
-						$liiResult = $script:MouseAPI::GetLastInputInfo([ref]$lii)
-							if ($liiResult) {
-								$tickNow = [uint64]$script:MouseAPI::GetTickCount64()
-								$lastInputTick = [uint64]$lii.dwTime
-								$systemIdleMs = $tickNow - $lastInputTick
-								$recentSimulated = ($null -ne $LastSimulatedKeyPress) -and ((Get-TimeSinceMs -StartTime $LastSimulatedKeyPress) -lt 500)
-								$recentAutoMove = ($null -ne $LastAutomatedMouseMovement) -and ((Get-TimeSinceMs -StartTime $LastAutomatedMouseMovement) -lt 500)
-								if ($script:DiagEnabled) {
-									$ts = Get-Date -Format 'HH:mm:ss.fff'
-									"$ts - LII idleMs=$systemIdleMs simFilter=$recentSimulated autoFilter=$recentAutoMove kbDet=$keyboardInputDetected msDet=$mouseInputDetected scrollInt=$scrollDetectedInInterval" | Out-File $script:InputDiagFile -Append
-								}
-								if ($systemIdleMs -lt 300 -and -not $recentSimulated -and -not $recentAutoMove) {
-									$script:userInputDetected = $true
-									if ($script:AutoResumeDelaySeconds -gt 0) {
-										$LastUserInputTime = Get-Date
-									}
-									if (-not $keyboardInputDetected -and -not $scrollDetectedInInterval -and -not $mouseInputDetected) {
-										$mouseInputDetected = $true
-										$script:LastMouseMovementTime = Get-Date
-										$null = $intervalMouseInputs.Add("Mouse")
-										if ($script:DiagEnabled) { "  >> userInput=TRUE idleMs=$systemIdleMs -> mouse (no kb/scroll/click evidence)" | Out-File $script:InputDiagFile -Append }
-									} else {
-										if ($script:DiagEnabled) { "  >> userInput=TRUE idleMs=$systemIdleMs (already classified: kb=$keyboardInputDetected ms=$mouseInputDetected scroll=$scrollDetectedInInterval)" | Out-File $script:InputDiagFile -Append }
-									}
-								}
-							}
-						} catch {
-							if ($script:DiagEnabled) { "$(Get-Date -Format 'HH:mm:ss.fff') - GetLastInputInfo ERROR: $($_.Exception.Message)" | Out-File $script:InputDiagFile -Append }
-						}
-				} # end if (-not $_isViewerMode) — GetLastInputInfo
+			if (-not $_isViewerMode) {
+				if ($script:DiagEnabled) {
+					"$($date.ToString('HH:mm:ss.fff')) - LII pre-check kbDet=$keyboardInputDetected msDet=$mouseInputDetected scrollInt=$scrollDetectedInInterval" | Out-File $script:InputDiagFile -Append
+				}
+				if (Test-UserInputActivity -LastSimulatedKeyPressTime $LastSimulatedKeyPress -LastAutomatedMouseMovementTime $LastAutomatedMouseMovement) {
+					if (-not $keyboardInputDetected -and -not $scrollDetectedInInterval -and -not $mouseInputDetected) {
+						Register-UserInput -Source Mouse -Date $date -UserInputDetectedRef ([ref]$script:userInputDetected) -MouseDetectedRef ([ref]$mouseInputDetected)
+						$null = $intervalMouseInputs.Add("Mouse")
+						if ($script:DiagEnabled) { "$($date.ToString('HH:mm:ss.fff')) - LII: activity -> mouse (no kb/scroll/click evidence)" | Out-File $script:InputDiagFile -Append }
+					} else {
+						Register-UserInput -Source Mouse -Date $date -UserInputDetectedRef ([ref]$script:userInputDetected)
+						if ($script:DiagEnabled) { "$($date.ToString('HH:mm:ss.fff')) - LII: activity (already classified: kb=$keyboardInputDetected ms=$mouseInputDetected scroll=$scrollDetectedInInterval)" | Out-File $script:InputDiagFile -Append }
+					}
+				}
+			} # end if (-not $_isViewerMode) — GetLastInputInfo
 
 				# Check for left-click via console input buffer (exact cell coordinates from the console)
 						if ($null -ne $script:ConsoleClickCoords) {
@@ -979,13 +922,9 @@
 									0x05 { "XButton1" }
 									0x06 { "XButton2" }
 								}
-							if ($mouseButtonName -and $intervalMouseInputs.Add($mouseButtonName)) {
-								$script:userInputDetected = $true
-									$mouseInputDetected = $true
-									if ($script:AutoResumeDelaySeconds -gt 0) {
-										$LastUserInputTime = Get-Date
-									}
-								}
+						if ($mouseButtonName -and $intervalMouseInputs.Add($mouseButtonName)) {
+							Register-UserInput -Source Click -Date $date -UserInputDetectedRef ([ref]$script:userInputDetected) -MouseDetectedRef ([ref]$mouseInputDetected)
+						}
 							}
 							$script:previousKeyStates[$keyCode] = $isCurrentlyPressed
 						}
@@ -1041,15 +980,9 @@
 						} else {
 							Show-Notification -Body "Resumed" -Action resumed
 						}
-						if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
-						$null = $LogArray.Add([PSCustomObject]@{
-							logRow = $true
-							components = @(
-								@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
-								@{ priority = 2; text = " - $(if ($script:ManualPause) { "$($script:WindowTitle) paused" } else { "$($script:WindowTitle) resumed" }) via click"; shortText = " - $(if ($script:ManualPause) { "$($script:WindowTitle) paused" } else { "$($script:WindowTitle) resumed" })" }
-							)
-						})
-						if ($_isViewerMode) {
+					$_clickPauseBody = if ($script:ManualPause) { " - $($script:WindowTitle) paused" } else { " - $($script:WindowTitle) resumed" }
+					Add-LogEntry -LogArray $LogArray -Rows $Rows -Date $date -Text "$_clickPauseBody via click" -ShortText $_clickPauseBody
+					if ($_isViewerMode) {
 							try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'togglePause'; paused = $script:ManualPause } } catch {}
 						}
 						$menuHotkeyToProcess = $null
@@ -1077,60 +1010,29 @@
 				}
 
 				# Display sleep wake check — same detection timing as menu button presses.
-				# Grace window: ignore all input for 1.5 s after sleep is activated, so that
+				# Grace window: ignore all input for 1.5 s after sleep is activated so that
 				# the keypress or click that triggered sleep does not immediately re-wake the display.
-				# Keyboard, click, and $mouseInputDetected (same flag that skips the movement interval)
-				# use Wake. Raw PrePos cursor drift without that flag uses Verify only (power-cycle /
-				# already-on); automated SetCursorPos does not set $mouseInputDetected (worker filters
-				# recentAutoMove; inline updates lastMousePosCheck after each settle).
+				# All three wake triggers reuse signals already produced this tick — no second sensor.
 				if ($script:DisplaySleepMode -and $null -ne $script:DisplaySleepActivatedAt -and
 						((Get-Date) - $script:DisplaySleepActivatedAt).TotalMilliseconds -gt 1500) {
-					$_wakeMousePos    = Get-MousePosition
-					$_wakeMouseMoved  = ($null -ne $_wakeMousePos) -and (Test-MouseMoved -CurrentPos $_wakeMousePos -LastPos $script:DisplaySleepPrePos -Threshold 5)
-					$_wakeHadClick    = $null -ne $script:ConsoleClickCoords
+					$_wakeHadClick = $null -ne $script:ConsoleClickCoords
 					# [char]0 is also excluded by the ReadKey loop's truthiness check on $keyPress,
 					# but the VK guard is belt-and-suspenders against any keyboard layout that may
 					# produce a non-zero character for the Right Alt keep-alive key.
 					$_wakeHadKey = $null -ne $lastKeyPress -and
 						($null -eq $lastKeyInfo -or $lastKeyInfo.VirtualKeyCode -notin @(18, 165))
 					if ($_wakeHadClick -or $_wakeHadKey -or $mouseInputDetected) {
-						# Explicit wake: same user-input signal as interval skip (incl. real mouse)
-						if (Invoke-DisplaySleep -Action Wake) {
-							$script:DisplaySleepMode        = $false
-							$script:DisplaySleepActivatedAt = $null
-							$script:_DisplaySleepLastInputTime = Get-Date
-							$lastKeyPress = $null
-							$lastKeyInfo  = $null
-							if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleep'; active = $false } } catch {} }
-							if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
-							$null = $LogArray.Add([PSCustomObject]@{
-								logRow = $true
-								components = @(
-									@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
-									@{ priority = 2; text = " - Display woke on user input"; shortText = " - Display wake ok" }
-								)
-							})
-							Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
+					if (Invoke-DisplaySleep -Action Wake) {
+						$script:DisplaySleepMode        = $false
+						$script:DisplaySleepActivatedAt = $null
+						$script:LastUserActivityTime     = $date
+						$lastKeyPress = $null
+						$lastKeyInfo  = $null
+						Send-ViewerMessage @{ type = 'displaySleep'; active = $false }
+						Add-LogEntry -LogArray $LogArray -Rows $Rows -Date $date -Text " - Display woke on user input" -ShortText " - Display wake ok"
+						Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
 						}
 						# On failure: Invoke-DisplaySleep plays retry beep; flag stays set, next input retries
-					} elseif ($_wakeMouseMoved) {
-						# Verify only: panel already on (power-cycle) without classified user mouse.
-						# Automated SetCursorPos moves the cursor but leaves VCP off — returns false, no action.
-						if (Invoke-DisplaySleep -Action Verify) {
-							$script:DisplaySleepMode        = $false
-							$script:DisplaySleepActivatedAt = $null
-							$script:_DisplaySleepLastInputTime = Get-Date
-							if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleep'; active = $false } } catch {} }
-							if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
-							$null = $LogArray.Add([PSCustomObject]@{
-								logRow = $true
-								components = @(
-									@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
-									@{ priority = 2; text = " - Display woke via already-on detect"; shortText = " - Display wake ok" }
-								)
-							})
-							Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
-						}
 					}
 				}
 
@@ -1139,23 +1041,23 @@
 						if ($shouldProcessEscape) {
 							$lastKeyPress = $null
 							$lastKeyInfo = $null
-							if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = 'quit' } } catch {} }
+							Send-ViewerMessage @{ type = 'viewerState'; activeDialog = 'quit' }
 							$HostWidthRef = [ref]$HostWidth
 							$HostHeightRef = [ref]$HostHeight
 							$quitResult = Show-QuitConfirmationDialog -hostWidthRef $HostWidthRef -hostHeightRef $HostHeightRef
 							$HostWidth = $HostWidthRef.Value
 							$HostHeight = $HostHeightRef.Value
 							if ($quitResult.NeedsRedraw) {
-								if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = $null } } catch {} }
+								Send-ViewerMessage @{ type = 'viewerState'; activeDialog = $null }
 								Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 								break
 							}
 						if ($quitResult.Result -eq $true) {
-							if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'quit' } } catch {} }
+							Send-ViewerMessage @{ type = 'quit' }
 							Write-StoppedMessage -ScriptStartTime $ScriptStartTime
 							break process
 					} else {
-						if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = $null } } catch {} }
+						Send-ViewerMessage @{ type = 'viewerState'; activeDialog = $null }
 						Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 						break
 					}
@@ -1166,19 +1068,19 @@
 						if ($DebugMode) {
 							Add-DebugLogEntry -LogArray $LogArray -Date $date -Message "Quit dialog opened" -ShortMessage "Quit opened"
 						}
-							if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = 'quit' } } catch {} }
+							Send-ViewerMessage @{ type = 'viewerState'; activeDialog = 'quit' }
 							$HostWidthRef = [ref]$HostWidth
 							$HostHeightRef = [ref]$HostHeight
 							$quitResult = Show-QuitConfirmationDialog -hostWidthRef $HostWidthRef -hostHeightRef $HostHeightRef
 							$HostWidth = $HostWidthRef.Value
 							$HostHeight = $HostHeightRef.Value
 							if ($quitResult.NeedsRedraw) {
-								if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = $null } } catch {} }
+								Send-ViewerMessage @{ type = 'viewerState'; activeDialog = $null }
 								Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 								break
 							}
 							if ($quitResult.Result -eq $true) {
-								if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'quit' } } catch {} }
+								Send-ViewerMessage @{ type = 'quit' }
 							if ($DebugMode) {
 								Add-DebugLogEntry -LogArray $LogArray -Date $date -Message "Quit confirmed"
 							}
@@ -1188,7 +1090,7 @@
 						if ($DebugMode) {
 							Add-DebugLogEntry -LogArray $LogArray -Date $date -Message "Quit canceled"
 						}
-								if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = $null } } catch {} }
+								Send-ViewerMessage @{ type = 'viewerState'; activeDialog = $null }
 								Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 								break
 							}
@@ -1226,8 +1128,8 @@
 					if ($dlgResult.NeedsRedraw) {
 						Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
 					}
-					# Sync updated settings to worker; restart idle clock so Apply does not sleep immediately
-					$script:_DisplaySleepLastInputTime = Get-Date
+				# Sync updated settings to worker; restart idle clock so Apply does not sleep immediately
+				$script:LastUserActivityTime = Get-Date
 					if ($_isViewerMode) {
 						try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleepSettings'; audioEnabled = $script:DisplaySleepAudioEnabled; autoEnabled = $script:DisplaySleepAutoEnabled; autoTimeoutSecs = $script:DisplaySleepAutoTimeoutSecs } } catch {}
 					}
@@ -1235,35 +1137,20 @@
 				}
 				if ($doSleep) {
 					Start-Sleep -Milliseconds 500
-					$null = Invoke-DisplaySleep -Action Sleep
-					$script:DisplaySleepMode        = $true
-					$script:DisplaySleepActivatedAt = Get-Date
-					$script:DisplaySleepPrePos      = Get-MousePosition
-					if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleep'; active = $true } } catch {} }
-					if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
-					$null = $LogArray.Add([PSCustomObject]@{
-						logRow = $true
-						components = @(
-							@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
-							@{ priority = 2; text = " - Display sleep activated"; shortText = " - Display sleep on" }
-						)
-					})
-				}
-			} else {
-				if (Invoke-DisplaySleep -Action Wake) {
-					$script:DisplaySleepMode = $false
-					$script:DisplaySleepActivatedAt = $null
-					$script:_DisplaySleepLastInputTime = Get-Date
-					if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleep'; active = $false } } catch {} }
-					if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
-					$null = $LogArray.Add([PSCustomObject]@{
-						logRow = $true
-						components = @(
-							@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
-							@{ priority = 2; text = " - Display wake confirmed"; shortText = " - Display wake ok" }
-						)
-					})
-					Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
+				$null = Invoke-DisplaySleep -Action Sleep
+				$script:DisplaySleepMode        = $true
+				$script:DisplaySleepActivatedAt = Get-Date
+			Send-ViewerMessage @{ type = 'displaySleep'; active = $true }
+			Add-LogEntry -LogArray $LogArray -Rows $Rows -Date $date -Text " - Display sleep activated" -ShortText " - Display sleep on"
+			}
+	} else {
+		if (Invoke-DisplaySleep -Action Wake) {
+			$script:DisplaySleepMode = $false
+			$script:DisplaySleepActivatedAt = $null
+			$script:LastUserActivityTime = $date
+			Send-ViewerMessage @{ type = 'displaySleep'; active = $false }
+			Add-LogEntry -LogArray $LogArray -Rows $Rows -Date $date -Text " - Display wake confirmed" -ShortText " - Display wake ok"
+			Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw)
 				}
 			}
 			break
@@ -1271,7 +1158,7 @@
 					$lastKeyPress = $null
 					$lastKeyInfo  = $null
 				if ($script:DiagEnabled -and $_isViewerMode) { "$(Get-Date -Format 'HH:mm:ss.fff') - VIEWER DIALOG OPEN type=settings pipeConnected=$($_viewerPipeClient.IsConnected)" | Out-File $script:IpcDiagFile -Append }
-			if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = 'settings' } } catch {} }
+			Send-ViewerMessage @{ type = 'viewerState'; activeDialog = 'settings' }
 			$HostWidthRef  = [ref]$HostWidth;  $HostHeightRef = [ref]$HostHeight
 			$endTimeIntRef = [ref]$endTimeInt; $endTimeStrRef = [ref]$endTimeStr
 			$endRef        = [ref]$end;        $logArrayRef   = [ref]$LogArray
@@ -1472,13 +1359,13 @@
 			} elseif (($lastKeyPress -eq "?" -or $lastKeyPress -eq "/") -and $Output -ne "hidden") {
 				$lastKeyPress = $null
 				$lastKeyInfo  = $null
-				if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = 'info' } } catch {} }
+				Send-ViewerMessage @{ type = 'viewerState'; activeDialog = 'info' }
 				$HostWidthRef  = [ref]$HostWidth
 				$HostHeightRef = [ref]$HostHeight
 				$null = Show-InfoDialog -hostWidthRef $HostWidthRef -hostHeightRef $HostHeightRef
 				$HostWidth  = $HostWidthRef.Value
 				$HostHeight = $HostHeightRef.Value
-				if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = $null } } catch {} }
+				Send-ViewerMessage @{ type = 'viewerState'; activeDialog = $null }
 				Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 				break
 			} elseif ($lastKeyPress -eq "t" -and $Output -ne "hidden") {
@@ -1560,33 +1447,20 @@
 			# Keyboard and mouse input checking is now done every 200ms in the wait loop above
 			# This provides more reliable detection compared to checking once per interval
 			
-		if (-not $_isViewerMode) {
-			# Safety net: detect user input via GetLastInputInfo after wait loop.
-			# Same inference as wait-loop: unclassified activity -> mouse movement.
-		try {
-			if ($script:MouseAPI::GetLastInputInfo([ref]$lii)) {
-					$tickNow = [uint64]$script:MouseAPI::GetTickCount64()
-					$lastInputTick = [uint64]$lii.dwTime
-					$systemIdleMs = $tickNow - $lastInputTick
-					$recentSimulated = ($null -ne $LastSimulatedKeyPress) -and ((Get-TimeSinceMs -StartTime $LastSimulatedKeyPress) -lt 500)
-					$recentAutoMove = ($null -ne $LastAutomatedMouseMovement) -and ((Get-TimeSinceMs -StartTime $LastAutomatedMouseMovement) -lt 500)
-
-					if ($systemIdleMs -lt 300 -and -not $recentSimulated -and -not $recentAutoMove) {
-						$script:userInputDetected = $true
-						if ($script:AutoResumeDelaySeconds -gt 0) {
-							$LastUserInputTime = Get-Date
-						}
-						if (-not $keyboardInputDetected -and -not $scrollDetectedInInterval -and -not $mouseInputDetected) {
-							$mouseInputDetected = $true
-							$script:LastMouseMovementTime = Get-Date
-						$null = $intervalMouseInputs.Add("Mouse")
-					}
+	if (-not $_isViewerMode) {
+		# Safety net: detect user input via GetLastInputInfo after wait loop.
+		# Skips if per-tick detection already classified the interval (reuse, not re-measure).
+		if (-not $script:userInputDetected) {
+			if (Test-UserInputActivity -LastSimulatedKeyPressTime $LastSimulatedKeyPress -LastAutomatedMouseMovementTime $LastAutomatedMouseMovement) {
+				if (-not $keyboardInputDetected -and -not $scrollDetectedInInterval -and -not $mouseInputDetected) {
+					Register-UserInput -Source Mouse -Date $date -UserInputDetectedRef ([ref]$script:userInputDetected) -MouseDetectedRef ([ref]$mouseInputDetected)
+					$null = $intervalMouseInputs.Add("Mouse")
+				} else {
+					Register-UserInput -Source Mouse -Date $date -UserInputDetectedRef ([ref]$script:userInputDetected)
 				}
 			}
-		} catch {
-			# GetLastInputInfo not available, skip
 		}
-		} # end if (-not $_isViewerMode) — safety net
+	} # end if (-not $_isViewerMode) — safety net
 			
 			# Check for window size changes outside the wait loop (catches resizes that happen during rendering)
 		if (-not $forceRedraw) {
@@ -1651,30 +1525,18 @@
 			}
 		} # end if (-not $_isViewerMode) — mouse settle + skip determination
 
-		# Recurring idle clock for auto display sleep (viewer + inline)
-		if ($script:userInputDetected) {
-			$script:_DisplaySleepLastInputTime = Get-Date
-		}
-			
-		# Auto-sleep: while enabled, re-sleep whenever idle timeout elapses and display is awake
-		if ($script:DisplaySleepAutoEnabled -and -not $script:DisplaySleepMode) {
-			$_idleSecs = ((Get-Date) - $script:_DisplaySleepLastInputTime).TotalSeconds
+	# Auto-sleep: while enabled, re-sleep whenever idle timeout elapses and display is awake.
+	# $script:LastUserActivityTime is kept current by Register-UserInput on every detection.
+	if ($script:DisplaySleepAutoEnabled -and -not $script:DisplaySleepMode) {
+		$_idleSecs = ($date - $script:LastUserActivityTime).TotalSeconds
 			if ($_idleSecs -ge $script:DisplaySleepAutoTimeoutSecs) {
-				$null = Invoke-DisplaySleep -Action Sleep
-				$script:DisplaySleepMode        = $true
-				$script:DisplaySleepActivatedAt = Get-Date
-				$script:DisplaySleepPrePos      = Get-MousePosition
-				if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'displaySleep'; active = $true } } catch {} }
-				if ($LogArray.Count -gt 0 -and $LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
-				$null = $LogArray.Add([PSCustomObject]@{
-					logRow = $true
-					components = @(
-						@{ priority = 1; text = $date.ToString("HH:mm:ss"); shortText = $date.ToString("HH:mm:ss") },
-						@{ priority = 2; text = " - Auto display sleep activated"; shortText = " - Auto sleep" }
-					)
-				})
-			}
+		$null = Invoke-DisplaySleep -Action Sleep
+		$script:DisplaySleepMode        = $true
+		$script:DisplaySleepActivatedAt = $date
+	Send-ViewerMessage @{ type = 'displaySleep'; active = $true }
+	Add-LogEntry -LogArray $LogArray -Rows $Rows -Date $date -Text " - Auto display sleep activated" -ShortText " - Auto sleep"
 		}
+	}
 
 		# Prepare UI dimensions
 		$oldRows = $Rows
@@ -1735,45 +1597,34 @@
 									   $null -ne $currentPos -and
 									   $currentPos.X -eq $automatedMovementPos.X -and 
 									   $currentPos.Y -eq $automatedMovementPos.Y)
-					if (-not $isAutomatedPos) {
-						# User moved mouse during interval - skip automated movement
-						$SkipUpdate = $true
-						$PosUpdate = $false
-						$mouseInputDetected = $true
-						# Reset auto-resume delay timer on user input
-						if ($script:AutoResumeDelaySeconds -gt 0) {
-							$LastUserInputTime = Get-Date
-						}
+				if (-not $isAutomatedPos) {
+					$SkipUpdate = $true
+					$PosUpdate = $false
+					Register-UserInput -Source Mouse -Date $date -UserInputDetectedRef ([ref]$script:userInputDetected) -MouseDetectedRef ([ref]$mouseInputDetected)
 					$null = $intervalMouseInputs.Add("Mouse")
 					$LastPos = $currentPos
-						$automatedMovementPos = $null  # Clear automated position since user moved
-					}
+					$automatedMovementPos = $null
+				}
 					# If it matches our automated position, ignore it (it is from our movement)
 				}
 			}
 			
-			# Check if auto-resume delay timer is active (check before skipUpdate logic)
-			$cooldownActive = $false
-			$secondsRemaining = 0
-			if ($script:AutoResumeDelaySeconds -gt 0) {
-				if ($null -eq $LastUserInputTime) {
-					# Timer has not started yet (no user input detected yet) - allow movement
-					$cooldownActive = $false
-				} else {
-					$timeSinceInput = ((Get-Date) - $LastUserInputTime).TotalSeconds
-					if ($timeSinceInput -lt $script:AutoResumeDelaySeconds) {
-						$cooldownActive = $true
-						$secondsRemaining = [Math]::Ceiling($script:AutoResumeDelaySeconds - $timeSinceInput)
-					} else {
-						# Timer expired - clear it
-					if ($DebugMode -and $null -ne $LastUserInputTime) {
-						Add-DebugLogEntry -LogArray $LogArray -Date $date -Message "Auto-resume delay expired, resuming" -ShortMessage "Resumed"
-					}
-						$LastUserInputTime = $null
-						$cooldownActive = $false
-					}
+		# Check if auto-resume delay timer is active (check before skipUpdate logic)
+		$cooldownActive = $false
+		$secondsRemaining = 0
+		if ($script:AutoResumeDelaySeconds -gt 0 -and $script:_CooldownArmed) {
+			$timeSinceInput = ($date - $script:LastUserActivityTime).TotalSeconds
+			if ($timeSinceInput -lt $script:AutoResumeDelaySeconds) {
+				$cooldownActive = $true
+				$secondsRemaining = [Math]::Ceiling($script:AutoResumeDelaySeconds - $timeSinceInput)
+			} else {
+				if ($DebugMode) {
+					Add-DebugLogEntry -LogArray $LogArray -Date $date -Message "Auto-resume delay expired, resuming" -ShortMessage "Resumed"
 				}
+				$script:_CooldownArmed = $false
+				$cooldownActive = $false
 			}
+		}
 			
 			if ($SkipUpdate -ne $true -and -not $script:ManualPause) {
 				if ($cooldownActive) {
@@ -1846,18 +1697,16 @@
 				
 		$moveResult = Invoke-CursorMovement -Points $movementPoints -FallbackX $x -FallbackY $y
 		$movementAborted = $moveResult.Aborted
-		if ($movementAborted) {
-			$SkipUpdate = $true
-			$script:userInputDetected = $true
-			$mouseInputDetected = $true
-			$null = $intervalMouseInputs.Add("Mouse")
-			if ($script:AutoResumeDelaySeconds -gt 0) { $LastUserInputTime = Get-Date }
-			$LastPos = $moveResult.ActualPosition
-			$automatedMovementPos = $null
-			if ($script:DiagEnabled) {
-				"$(Get-Date -Format 'HH:mm:ss.fff') - Loop $($script:LoopIteration): Movement aborted at step $($moveResult.Step)/$($moveResult.TotalSteps) - user moved mouse (drift: $($moveResult.DriftX),$($moveResult.DriftY))" | Out-File $script:SettleDiagFile -Append
-			}
+	if ($movementAborted) {
+		$SkipUpdate = $true
+		Register-UserInput -Source Mouse -Date $date -UserInputDetectedRef ([ref]$script:userInputDetected) -MouseDetectedRef ([ref]$mouseInputDetected)
+		$null = $intervalMouseInputs.Add("Mouse")
+		$LastPos = $moveResult.ActualPosition
+		$automatedMovementPos = $null
+		if ($script:DiagEnabled) {
+			"$($date.ToString('HH:mm:ss.fff')) - Loop $($script:LoopIteration): Movement aborted at step $($moveResult.Step)/$($moveResult.TotalSteps) - user moved mouse (drift: $($moveResult.DriftX),$($moveResult.DriftY))" | Out-File $script:SettleDiagFile -Append
 		}
+	}
 				
 				if ($movementAborted) {
 					$PosUpdate = $false
@@ -2150,7 +1999,7 @@
 			if ($script:PendingReopenSettings) {
 				$script:PendingReopenSettings = $false
 		if ($script:DiagEnabled -and $_isViewerMode) { "$(Get-Date -Format 'HH:mm:ss.fff') - VIEWER DIALOG REOPEN type=settings (PendingReopenSettings)" | Out-File $script:IpcDiagFile -Append }
-		if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = 'settings' } } catch {} }
+		Send-ViewerMessage @{ type = 'viewerState'; activeDialog = 'settings' }
 		$HostWidthRef  = [ref]$HostWidth;  $HostHeightRef = [ref]$HostHeight
 		$endTimeIntRef = [ref]$endTimeInt; $endTimeStrRef = [ref]$endTimeStr
 		$endRef        = [ref]$end;        $logArrayRef   = [ref]$LogArray
@@ -2197,17 +2046,17 @@
 			} elseif ($script:_PendingReopenQuit) {
 				$script:_PendingReopenQuit = $false
 				Flush-Buffer -ClearFirst
-				if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = 'quit' } } catch {} }
+				Send-ViewerMessage @{ type = 'viewerState'; activeDialog = 'quit' }
 				$HostWidthRef = [ref]$HostWidth; $HostHeightRef = [ref]$HostHeight
 				$quitResult = Show-QuitConfirmationDialog -hostWidthRef $HostWidthRef -hostHeightRef $HostHeightRef
 				$HostWidth = $HostWidthRef.Value; $HostHeight = $HostHeightRef.Value
-				if ($_isViewerMode -and $quitResult.Result -ne $true) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = $null } } catch {} }
+				if ($quitResult.Result -ne $true) { Send-ViewerMessage @{ type = 'viewerState'; activeDialog = $null } }
 				if ($quitResult.NeedsRedraw) {
 					Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 					Write-MainFrame -Force:$true -Date $date -NoFlush
 					Flush-Buffer -ClearFirst
 			} elseif ($quitResult.Result -eq $true) {
-				if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'quit' } } catch {} }
+				Send-ViewerMessage @{ type = 'quit' }
 				Write-StoppedMessage -ScriptStartTime $ScriptStartTime
 				break process
 				} else {
@@ -2216,11 +2065,11 @@
 			} elseif ($script:_PendingReopenInfo) {
 				$script:_PendingReopenInfo = $false
 				Flush-Buffer -ClearFirst
-				if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = 'info' } } catch {} }
+				Send-ViewerMessage @{ type = 'viewerState'; activeDialog = 'info' }
 				$HostWidthRef = [ref]$HostWidth; $HostHeightRef = [ref]$HostHeight
 				$null = Show-InfoDialog -hostWidthRef $HostWidthRef -hostHeightRef $HostHeightRef
 				$HostWidth = $HostWidthRef.Value; $HostHeight = $HostHeightRef.Value
-				if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ type = 'viewerState'; activeDialog = $null } } catch {} }
+				Send-ViewerMessage @{ type = 'viewerState'; activeDialog = $null }
 				Reset-PostDialogState -SkipUpdateRef ([ref]$SkipUpdate) -ForceRedrawRef ([ref]$forceRedraw) -OldWindowSizeRef ([ref]$oldWindowSize) -OldBufferSizeRef ([ref]$OldBufferSize)
 			} else {
 				Flush-Buffer -ClearFirst

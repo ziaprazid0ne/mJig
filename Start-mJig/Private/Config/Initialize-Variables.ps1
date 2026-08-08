@@ -67,9 +67,12 @@
 	$script:DisplaySleepAudioEnabled    = $true
 	$script:DisplaySleepAutoEnabled     = $false
 	$script:DisplaySleepAutoTimeoutSecs = 60
-	$script:_DisplaySleepLastInputTime  = Get-Date
 	$script:DisplaySleepActivatedAt     = $null
-	$script:DisplaySleepPrePos          = $null
+	# Single unified activity clock: drives auto-sleep idle and auto-resume cooldown.
+	# Initialized to module load time so auto-sleep does not fire immediately at startup.
+	$script:LastUserActivityTime        = Get-Date
+	# Armed flag: $false until first real user input; prevents spurious cooldown on startup.
+	$script:_CooldownArmed              = $false
 
 	# Performance and UI state
 	$script:MethodCache = @{}
@@ -99,6 +102,9 @@
 		$script:WindowTitle = "mJig"
 		$script:TitleEmoji  = 0x1F400
 	}
+
+	# Layout cache for Write-MainFrame geometry (invalidated by stamp change)
+	$script:_FrameLayout = $null
 
 	# Click and button tracking
 	$script:MenuClickHotkey        = $null

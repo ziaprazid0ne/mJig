@@ -29,7 +29,8 @@ All dialogs must clear `$script:DialogButtonBounds = $null` and `$script:DialogB
 ## Parent Chain Redraw (Sub-Dialogs)
 
 Sub-dialogs (Time, Movement from Settings) accept `[scriptblock]$ParentRedrawCallback`. On resize:
-```
+
+```text
 Write-MainFrame -Force -NoFlush -> & $ParentRedrawCallback -> queue sub-dialog -> Flush-Buffer -ClearFirst
 ```
 
@@ -41,10 +42,43 @@ Scriptblock callbacks run in the caller's scope, not the definer's. Save values 
 
 Uses `PeekConsoleInput` MOUSE_EVENT records with exact character cell coordinates. Hit-testing uses exact character cell matching — no tolerance, no pixel math.
 
+## Shared Rendering Helpers (use instead of hand-drawing)
+
+### `Invoke-DialogResize` (`Private/Helpers/Invoke-DialogResize.ps1`)
+
+Wraps the resize skeleton used in all 8 dialogs. Parameters: `-HostWidthRef`, `-HostHeightRef`, `-ScreenState`, `-RedrawCallback`, `-ParentRedrawCallback`. All dialogs must use this instead of inlining the resize sequence.
+
+```powershell
+Invoke-DialogResize -HostWidthRef ([ref]$localW) -HostHeightRef ([ref]$localH) `
+    -ScreenState "dialog-settings" -RedrawCallback { param($w,$h) <draw dialog at new size> } `
+    -ParentRedrawCallback $settingsParentRedraw
+```
+
+### `Write-DialogButton` (`Private/Rendering/Write-DialogButton.ps1`)
+
+Renders a single dialog button (brackets → emoji + separator → paren/hotkey/suffix) using `DialogButton*` theme variables. Returns the rendered width for accurate click-bound math.
+
+```powershell
+$btnW = Write-DialogButton -X $btnX -Y $btnY -Hotkey "a" -Suffix "pply" `
+    -Emoji $checkmark -EmojiColor $script:TextSuccess `
+    -TextColor $script:DialogButtonText -BgColor $script:DialogButtonBg `
+    -HotkeyColor $script:DialogButtonHotkey
+```
+
+### `Write-DialogFrame` (`Private/Rendering/Write-DialogFrame.ps1`)
+
+Queues top border, title row, standard divider (Y+2), and bottom border. Content rows are the caller's responsibility. Uses `-NoDivider` to skip the Y+2 divider when the dialog has a custom title row.
+
+```powershell
+Write-DialogFrame -X $dialogX -Y $dialogY -Width $dialogWidth -Height $dialogHeight `
+    -Title "Confirm Quit" -BorderFG $script:QuitDialogBorder `
+    -TitleFG $script:QuitDialogTitle -BG $script:QuitDialogBg
+```
+
 ## Available Dialogs
 
 | Dialog | File | Trigger | Returns |
-|--------|------|---------|---------|
+| --- | --- | --- | --- |
 | `Show-TimeChangeDialog` | `Private/Dialogs/Show-TimeChangeDialog.ps1` | `e` hotkey in Settings | `@{ Result; NeedsRedraw }` |
 | `Show-MovementModifyDialog` | `Private/Dialogs/Show-MovementModifyDialog.ps1` | `m` hotkey in Settings | `@{ Result; NeedsRedraw }` |
 | `Show-QuitConfirmationDialog` | `Private/Dialogs/Show-QuitConfirmationDialog.ps1` | `q` hotkey / menu | `@{ Result; NeedsRedraw }` |
@@ -52,10 +86,12 @@ Uses `PeekConsoleInput` MOUSE_EVENT records with exact character cell coordinate
 | `Show-OptionsDialog` | `Private/Dialogs/Show-OptionsDialog.ps1` | `o` hotkey in Settings | `@{ NeedsRedraw; TitleChanged }` |
 | `Show-InfoDialog` | `Private/Dialogs/Show-InfoDialog.ps1` | `?` hotkey | `@{ NeedsRedraw }` |
 | `Show-ThemeDialog` | `Private/Dialogs/Show-ThemeDialog.ps1` | `t` hotkey in Settings | `@{ NeedsRedraw }` |
+| `Show-DisplaySleepDialog` | `Private/Dialogs/Show-DisplaySleepDialog.ps1` | `d` menu click | `@{ NeedsRedraw }` |
 
 ## Apply / Cancel Pattern (Options and Theme Dialogs)
 
 Dialogs that support live preview (Options, Theme) capture initial state at open and offer explicit Apply/Cancel buttons:
+
 - **Apply** (`a` or Enter): close keeping all changes made during the session
 - **Cancel** (`c`, Escape, or click outside): revert all changes to pre-dialog values and close
 - Initial state is captured in local variables at the top of the dialog function (before the input loop)

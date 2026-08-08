@@ -27,6 +27,7 @@ The worker maintains `$_viewerVisualState` (outputMode, previousView, windowTitl
 New viewer applies it immediately after connect: restores `$Output`, `$PreviousView`, `$script:WindowTitle`, `$script:TitleEmoji`, `$script:TitlePresetIndex`, `$script:ManualPause`, and sets one of `$script:PendingReopenSettings` / `$script:_PendingReopenQuit` / `$script:_PendingReopenInfo` based on `activeDialog`, plus `$script:_PendingRestoreSubDialog`.
 
 **`viewerState` message** (viewer → worker): `{ type='viewerState'; activeDialog=$string|$null; activeSubDialog=$string|$null }`. `activeDialog` values:
+
 - `'settings'` — Settings panel is open (may also carry `activeSubDialog`)
 - `'quit'` — Quit confirmation dialog is open (Escape or `q` key)
 - `'info'` — Info/About dialog is open
@@ -52,6 +53,18 @@ After a viewer dialog closes, stale `state` messages in the pipe buffer could ov
 - Log and stopped messages are always processed regardless of epoch
 
 Epoch is incremented at all 6 viewer send sites.
+
+## Viewer IPC Sends (use the helper, never inline)
+
+`Send-ViewerMessage` (`Private/IPC/Send-ViewerMessage.ps1`) wraps the `if ($_isViewerMode) { try { Send-PipeMessage ... } catch {} }` guard pattern. All viewer-to-worker sends must use it. The swallow-error policy lives in one place.
+
+```powershell
+# CORRECT — one line per send
+Send-ViewerMessage -Writer $_viewerPipeWriter -Message @{ type = 'output'; mode = $Output; epoch = $_settingsEpoch }
+
+# WRONG — repeated 21× boilerplate
+if ($_isViewerMode) { try { Send-PipeMessage -Writer $_viewerPipeWriter -Message @{ ... } } catch {} }
+```
 
 ## Non-Blocking Writes
 

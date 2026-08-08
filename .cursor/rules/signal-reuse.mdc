@@ -1,0 +1,69 @@
+---
+description: Signal reuse rule for mJig — always consume existing detections and calculations instead of adding parallel classifiers
+globs: Start-mJig/**/*.ps1,Start-mJig/**/*.psm1
+alwaysApply: false
+---
+
+# Signal Reuse — Do Not Re-Detect What You Already Know
+
+## The canonical anti-pattern
+
+Display wake needed "did the user move the mouse?" That answer **already existed** as `$mouseInputDetected` (the interval-skip flag). Hours of iteration instead invented parallel classifiers (`GetLastInputInfo` wake, `SC_MONITORPOWER=2`, `DisplaySleepPrePos` drift check) that fought the automation filter and each other — until the existing flag was reused and the feature worked immediately.
+
+## Rules (all are hard requirements)
+
+**1. Before adding any detection, enumerate existing signals that already answer the question.**
+
+Canonical signal surface in the main module:
+- `$mouseInputDetected` — real user mouse movement or click this interval (automation filtered)
+- `$keyboardInputDetected` — keyboard activity this interval
+- `$script:userInputDetected` — any real user input this interval (superset)
+- `$scrollDetectedInInterval` — scroll wheel this interval
+- `$SkipUpdate` — worker says skip this movement cycle
+- `$cooldownActive` / `$secondsRemaining` — auto-resume cooldown state
+- IPC `state` message fields (`mouseInputDetected`, `keyboardInputDetected`, `userInputDetected`, `cooldownActive`, etc.)
+- Stats counters (`$script:Stats*`) — already reflect cumulative activity
+
+**2. Prefer consumers over producers.**
+
+Wire new policy or UI to existing signals. Never add a second classifier for the same physical meaning (e.g. a second mouse-movement test when `$mouseInputDetected` already exists).
+
+**3. One timestamp per meaning.**
+
+One "last real user activity" clock per process. Features read it; they do not keep private twins.
+
+Current canonical clocks:
+- `$script:LastUserActivityTime` — main module / viewer
+- `$_dsLastInputTime` — worker-local mirror
+
+Do not create additional clocks with names like `$LastUserInputTime`, `$_DisplaySleepLastInputTime`, or `$workerLastUserInputTime` for the same meaning.
+
+**4. Derive, do not remeasure.**
+
+If a value was computed this tick, pass or read it:
+- `$date` is refreshed every 50ms tick — use it; do not call `Get-Date` again in the same tick
+- Mouse position already read in the tick — share `$currentCheckPos`; do not call `Get-MousePosition` a second time
+- Cooldown already computed — read `$cooldownActive`; do not re-derive from timestamps
+
+**5. Three-strikes boilerplate rule.**
+
+The third copy of any block must become a `Private/` helper per the file-placement convention:
+- Log ring-buffer append → `Add-LogEntry`
+- Viewer IPC send guard → `Send-ViewerMessage`
+- Dialog resize skeleton → `Invoke-DialogResize`
+- Dialog button draw → `Write-DialogButton`
+- Dialog frame/borders → `Write-DialogFrame`
+
+## What to check when adding a new feature
+
+Ask these questions in order before writing any new detection or computation:
+
+1. Is there already a flag/variable that answers this? → Use it.
+2. Is there already a helper that does this calculation? → Call it.
+3. Does this same block appear twice already? → Extract a helper before adding the third copy.
+4. Am I calling `Get-Date` / `Get-MousePosition` / LII in a hot-path tick where `$date` / a mouse read / LII result already exists? → Reuse.
+
+## Shared input helpers
+
+- `Register-UserInput -Source Mouse|Keyboard|Scroll|Click -Date $date` — sets the classification flag, `$script:userInputDetected`, the unified activity clock, and the AutoResume timestamp in one place. The only permitted writer of those values.
+- `Test-UserInputActivity -Date $date -CurrentPos $pos -LastSimulatedTime $t1 -LastAutomatedTime $t2` — LII + filter math, returns `@{ ActivityDetected; MouseMoved }`. Use in all three former sites: worker, wait-loop, post-wait.

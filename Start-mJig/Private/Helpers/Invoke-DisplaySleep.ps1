@@ -1,9 +1,9 @@
 	function Invoke-DisplaySleep {
-		param(
-			[Parameter(Mandatory = $true)]
-			[ValidateSet('Sleep', 'Wake', 'Verify')]
-			[string]$Action
-		)
+	param(
+		[Parameter(Mandatory = $true)]
+		[ValidateSet('Sleep', 'Wake')]
+		[string]$Action
+	)
 
 		# Enumerates fresh physical monitor handles from all current HMONITORs.
 		# Returns a List[IntPtr] of physical monitor handles. Caller must call
@@ -72,21 +72,7 @@
 			return $true
 		}
 
-		# Verify: read the current VCP 0xD6 state without sending any command.
-		# Used after mouse movement / power-cycle detection: if the monitor is already on
-		# (user restarted it, or rare hardware DPMS self-wake), this reads 1.
-		# SetCursorPos does not inject HID and does not change VCP — returns false silently.
-		if ($Action -eq 'Verify') {
-			$anyOk = [bool](& $readVcpOn)
-			if ($anyOk -and $script:DisplaySleepAudioEnabled) {
-				[Console]::Beep(440, 200)
-				Start-Sleep -Milliseconds 80
-				[Console]::Beep(660, 150)
-			}
-			return $anyOk
-		}
-
-		# Wake: multi-attempt VCP knock + verify.
+	# Wake: multi-attempt VCP knock + verify.
 		# After minutes in DDC soft-off (VCP 0xD6=4), I2C is often dormant and a single
 		# SetVCPFeature may return true at the API level without reaching firmware.
 		# Do NOT use SC_MONITORPOWER=2 here: that puts Windows into "monitors off", after

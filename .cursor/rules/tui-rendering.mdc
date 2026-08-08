@@ -25,6 +25,7 @@ Flush-Buffer -ClearFirst   # ESC[2J + full frame in one write
 ## The `-DeferFlush` Pattern
 
 When a dialog reopens on top of a freshly redrawn main frame:
+
 1. `Write-MainFrame -Force -NoFlush` (buffer main frame)
 2. Dialog adds its content to the same buffer
 3. `Flush-Buffer -ClearFirst` paints everything atomically
@@ -46,3 +47,9 @@ Does NOT call `clear-host` or `[Console]::Clear()`. Only sets `$SkipUpdate`, `$f
 ## After `[Console]::Clear()` or `clear-host`
 
 Always call `Restore-ConsoleInputMode` — these calls strip `ENABLE_MOUSE_INPUT`.
+
+## Write-MainFrame Layout Cache
+
+`Write-MainFrame` caches all geometry that does not change between frames into `$script:_FrameLayout`. The cache is keyed by an invalidation stamp: `"$HostWidth|$HostHeight|$Output|$CurrentThemeName|$TitlePresetIndex|$DisplaySleepMode|$DebugMode"`. When the stamp is unchanged, geometry (log width, stats box visibility, menu item list, format widths, menu format selection, quit button width) is loaded from the cache. Stats *values* and the curve canvas are always recomputed (they are live data, not layout).
+
+Initialize with `$script:_FrameLayout = $null` in `Initialize-Variables.ps1`. The cache is invalidated automatically on resize, theme change, output-mode switch, title preset change, display-sleep icon change, or debug-mode toggle.

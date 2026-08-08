@@ -53,8 +53,11 @@
 			$longestLabel = [Math]::Max($label4, "Delay (sec): ".Length)
 			$inputBoxStartX = 3 + $longestLabel  # "$($script:BoxVertical)  " + longest label = X position where all input boxes start
 			
-			# Draw dialog function - simplified (no description box)
-			$drawDialog = {
+		# Button layout widths — computed once; all three button-bounds sites read from this
+		$_btnLayout = Get-DialogButtonLayout
+
+		# Draw dialog function - simplified (no description box)
+		$drawDialog = {
 				param($x, $y, $width, $height, $currentFieldIndex, $errorMsg, $inputBoxStartXPos, $fieldWidthValue, $intervalSec, $intervalVar, $moveSpeed, $moveVar, $travelDist, $travelDistVar, $autoResumeDelaySec)
 				
 				$fieldWidth = $fieldWidthValue
@@ -82,10 +85,9 @@
 				Write-Buffer -X $x -Y ($y + $i) -Text (" " * $width) -BG $script:MoveDialogBg
 			}
 				
-			# Top border (spans full width)
-			Write-Buffer -X $x -Y $y -Text "$($script:BoxTopLeft)" -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
-			Write-Buffer -Text ("$($script:BoxHorizontal)" * ($width - 2)) -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
-			Write-Buffer -Text "$($script:BoxTopRight)" -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
+			# Frame: top border + bottom border (title at row 1 via Write-SimpleDialogRow; no divider at row 2)
+			Write-DialogFrame -X $x -Y $y -Width $width -Height $height `
+				-Title "" -NoDivider -BorderFG $script:MoveDialogBorder -TitleFG $script:MoveDialogTitle -BG $script:MoveDialogBg
 				
 				# Title line
 				Write-SimpleDialogRow -X $x -y ($y + 1) -width $width -Content "Modify Movement Settings" -ContentColor $script:MoveDialogTitle -BackgroundColor $script:MoveDialogBg
@@ -150,52 +152,18 @@
 	# Bottom line with buttons (row 16)
 	$checkmark = [char]::ConvertFromUtf32(0x2705)
 	$redX = [char]::ConvertFromUtf32(0x274C)
-$buttonIconWidth = if ($script:DialogButtonShowIcon)     { 2 + $script:DialogButtonSeparator.Length } else { 0 }
-$buttonBracketWidth = if ($script:DialogButtonShowBrackets) { 2 } else { 0 }
-$buttonParenOffset = if ($script:DialogButtonShowHotkeyParens) { 0 } else { -2 }
 $applyButtonX = $x + 2
-$cancelButtonX = $applyButtonX + $buttonBracketWidth + $buttonIconWidth + 7 + $buttonParenOffset + 2  # bracket + icon + "(a)pply"(7) + gap(2)
-# Button line: border+space(2) + btn1(bracketW+iconW+7) + gap(2) + btn2(bracketW+iconW+8) = 19 + 2*iconWidth + 2*bracketWidth
-$buttonPadding = $width - (19 + 2 * $buttonParenOffset + 2 * $buttonIconWidth + 2 * $buttonBracketWidth) - 1
-Write-Buffer -X $x -Y ($y + 16) -Text "$($script:BoxVertical)" -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
-Write-Buffer -Text " " -BG $script:MoveDialogBg
-if ($script:DialogButtonShowBrackets) {
-	Write-Buffer -X $applyButtonX -Y ($y + 16) -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg
-}
-$applyButtonContentX = $applyButtonX + [int]$script:DialogButtonShowBrackets
-if ($script:DialogButtonShowIcon) {
-	Write-Buffer -X $applyButtonContentX -Y ($y + 16) -Text $checkmark -FG $script:TextSuccess -BG $script:MoveDialogButtonBg -Wide
-	Write-Buffer -X ($applyButtonContentX + 2) -Y ($y + 16) -Text $script:DialogButtonSeparator -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
-} else {
-	Write-Buffer -X $applyButtonContentX -Y ($y + 16) -Text "" -BG $script:MoveDialogButtonBg
-}
-$closingParen = if ($script:DialogButtonShowHotkeyParens) { ")" } else { "" }
-if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg }
-Write-Buffer -Text "a" -FG $script:MoveDialogButtonHotkey -BG $script:MoveDialogButtonBg
-Write-Buffer -Text "$($closingParen)pply" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
-if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+Write-Buffer -X $x -Y ($y + 16) -Text "$($script:BoxVertical) " -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
+$_applyW = Write-DialogButton -X $applyButtonX -Y ($y + 16) -Hotkey "a" -Suffix "pply" `
+	-Emoji $checkmark -EmojiColor $script:TextSuccess -TextColor $script:MoveDialogButtonText -BgColor $script:MoveDialogButtonBg -HotkeyColor $script:MoveDialogButtonHotkey
+$cancelButtonX = $applyButtonX + $_applyW + 2
 Write-Buffer -Text "  " -BG $script:MoveDialogBg
-if ($script:DialogButtonShowBrackets) {
-	Write-Buffer -X $cancelButtonX -Y ($y + 16) -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg
-}
-$cancelButtonContentX = $cancelButtonX + [int]$script:DialogButtonShowBrackets
-if ($script:DialogButtonShowIcon) {
-	Write-Buffer -X $cancelButtonContentX -Y ($y + 16) -Text $redX -FG $script:TextError -BG $script:MoveDialogButtonBg -Wide
-	Write-Buffer -X ($cancelButtonContentX + 2) -Y ($y + 16) -Text $script:DialogButtonSeparator -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
-} else {
-	Write-Buffer -X $cancelButtonContentX -Y ($y + 16) -Text "" -BG $script:MoveDialogButtonBg
-}
-if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg }
-Write-Buffer -Text "c" -FG $script:MoveDialogButtonHotkey -BG $script:MoveDialogButtonBg
-Write-Buffer -Text "$($closingParen)ancel" -FG $script:MoveDialogButtonText -BG $script:MoveDialogButtonBg
-	if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
-	Write-Buffer -Text (" " * $buttonPadding) -BG $script:MoveDialogBg
-	Write-Buffer -Text "$($script:BoxVertical)" -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
+$_cancelW = Write-DialogButton -X $cancelButtonX -Y ($y + 16) -Hotkey "c" -Suffix "ancel" `
+	-Emoji $redX -EmojiColor $script:TextError -TextColor $script:MoveDialogButtonText -BgColor $script:MoveDialogButtonBg -HotkeyColor $script:MoveDialogButtonHotkey
+$buttonPadding = $width - (2 + $_applyW + 2 + $_cancelW + 1) - 1
+Write-Buffer -Text (" " * $buttonPadding) -BG $script:MoveDialogBg
+Write-Buffer -Text "$($script:BoxVertical)" -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
 				
-			# Bottom border (spans full width)
-			Write-Buffer -X $x -Y ($y + 17) -Text "$($script:BoxBottomLeft)" -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
-			Write-Buffer -Text ("$($script:BoxHorizontal)" * ($width - 2)) -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
-			Write-Buffer -Text "$($script:BoxBottomRight)" -FG $script:MoveDialogBorder -BG $script:MoveDialogBg
 				
 				# Draw drop shadow
 				Write-DialogShadow -dialogX $x -dialogY $y -dialogWidth $width -dialogHeight $height -shadowColor $script:MoveDialogShadow
@@ -208,13 +176,10 @@ Write-Buffer -Text "$($closingParen)ancel" -FG $script:MoveDialogButtonText -BG 
 	# Calculate button bounds for click detection
 	# Button row is at dialogY + 16 (row 16)
 	$buttonRowY = $dialogY + 16
-$buttonIconWidth = if ($script:DialogButtonShowIcon)     { 2 + $script:DialogButtonSeparator.Length } else { 0 }
-$buttonBracketWidth = if ($script:DialogButtonShowBrackets) { 2 } else { 0 }
-$buttonParenOffset = if ($script:DialogButtonShowHotkeyParens) { 0 } else { -2 }
 $updateButtonStartX = $dialogX + 2
-$updateButtonEndX   = $dialogX + 2 + $buttonBracketWidth + $buttonIconWidth + 7 + $buttonParenOffset - 1   # bracket + icon + "(a)pply"(7) - 1 inclusive
-$cancelButtonStartX = $dialogX + 2 + $buttonBracketWidth + $buttonIconWidth + 7 + $buttonParenOffset + 2   # after btn1 + gap(2)
-$cancelButtonEndX   = $cancelButtonStartX + $buttonBracketWidth + $buttonIconWidth + 8 + $buttonParenOffset - 1  # bracket + icon + "(c)ancel"(8) - 1 inclusive
+$updateButtonEndX   = $dialogX + 2 + $_btnLayout.BracketWidth + $_btnLayout.IconWidth + 7 + $_btnLayout.ParenAdjustment - 1
+$cancelButtonStartX = $dialogX + 2 + $_btnLayout.BracketWidth + $_btnLayout.IconWidth + 7 + $_btnLayout.ParenAdjustment + 2
+$cancelButtonEndX   = $cancelButtonStartX + $_btnLayout.BracketWidth + $_btnLayout.IconWidth + 8 + $_btnLayout.ParenAdjustment - 1
 			
 			# Store button bounds in script scope for main loop click detection
 			$script:DialogButtonBounds = @{
@@ -255,27 +220,20 @@ $cancelButtonEndX   = $cancelButtonStartX + $buttonBracketWidth + $buttonIconWid
 				$pswindow = $pshost.UI.RawUI
 				$newWindowSize = $pswindow.WindowSize
 				if ($newWindowSize.Width -ne $currentHostWidth -or $newWindowSize.Height -ne $currentHostHeight) {
-					$stableSize = Invoke-ResizeHandler -PreviousScreenState "dialog-movement"
-					$HostWidthRef.Value  = $stableSize.Width
-					$HostHeightRef.Value = $stableSize.Height
+					$stableSize = Invoke-DialogResize -HostWidthRef $HostWidthRef -HostHeightRef $HostHeightRef `
+						-ScreenState "dialog-movement" -ParentRedrawCallback $ParentRedrawCallback
 					$currentHostWidth  = $stableSize.Width
 					$currentHostHeight = $stableSize.Height
-					Write-MainFrame -Force -NoFlush
-					if ($null -ne $ParentRedrawCallback) {
-						& $ParentRedrawCallback $currentHostWidth $currentHostHeight
-					}
 					$needsRedraw = $true
 					$dialogX = [math]::Max(0, [math]::Floor(($currentHostWidth - $dialogWidth) / 2))
 					$dialogY = [math]::Max(0, [math]::Floor(($currentHostHeight - $dialogHeight) / 2))
 					
-			# Recalculate button bounds after repositioning
-			$buttonRowY = $dialogY + 16
-			$buttonIconWidth = if ($script:DialogButtonShowIcon)     { 2 + $script:DialogButtonSeparator.Length } else { 0 }
-			$buttonBracketWidth = if ($script:DialogButtonShowBrackets) { 2 } else { 0 }
+		# Recalculate button bounds after repositioning
+		$buttonRowY = $dialogY + 16
 		$updateButtonStartX = $dialogX + 2
-		$updateButtonEndX   = $dialogX + 2 + $buttonBracketWidth + $buttonIconWidth + 7 - 1
-		$cancelButtonStartX = $dialogX + 2 + $buttonBracketWidth + $buttonIconWidth + 7 + 2
-		$cancelButtonEndX   = $cancelButtonStartX + $buttonBracketWidth + $buttonIconWidth + 8 - 1
+		$updateButtonEndX   = $dialogX + 2 + $_btnLayout.BracketWidth + $_btnLayout.IconWidth + 7 + $_btnLayout.ParenAdjustment - 1
+		$cancelButtonStartX = $dialogX + 2 + $_btnLayout.BracketWidth + $_btnLayout.IconWidth + 7 + $_btnLayout.ParenAdjustment + 2
+		$cancelButtonEndX   = $cancelButtonStartX + $_btnLayout.BracketWidth + $_btnLayout.IconWidth + 8 + $_btnLayout.ParenAdjustment - 1
 					
 					# Update button bounds in script scope
 					$script:DialogButtonBounds = @{

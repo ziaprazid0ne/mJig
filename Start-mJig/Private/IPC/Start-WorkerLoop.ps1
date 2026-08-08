@@ -50,10 +50,9 @@
 		$workerLastMovementDurationMs = 0
 		$workerLastSuccessMovementTime = $null
 		$workerLastSuccessMoveDurationMs = 0
-			$workerLastSimulatedKeyPress = $null
-			$workerLastAutomatedMouseMovement = (Get-Date).AddMinutes(-5)
-			$workerLastUserInputTime = $null
-			$workerLoopIteration = 0
+		$workerLastSimulatedKeyPress = $null
+		$workerLastAutomatedMouseMovement = (Get-Date).AddMinutes(-5)
+		$workerLoopIteration = 0
 			$workerStateTicks = 0
 		$_writeSkipCount = 0
 
@@ -89,21 +88,32 @@
 		$_displaySleepMode = $false
 		$_dsAutoEnabled    = $script:DisplaySleepAutoEnabled
 		$_dsAutoTimeoutSecs = $script:DisplaySleepAutoTimeoutSecs
-		$_dsLastInputTime  = Get-Date
-		# Used later in the worker loop (idle clock / auto-sleep); touch for PSScriptAnalyzer
-		$null = $_dsAutoTimeoutSecs
-		$null = $_dsLastInputTime
+	# Used later in the worker loop (idle clock / auto-sleep); touch for PSScriptAnalyzer
+	$null = $_dsAutoTimeoutSecs
+	# $script:LastUserActivityTime and $script:_CooldownArmed initialized by Initialize-Variables
 
-		# Viewer visual state — preserved across viewer sessions and sent in welcome message
-		$_viewerVisualState = @{
-			outputMode       = $script:Output
-			previousView     = $null
-			windowTitle      = $script:WindowTitle
-			titleEmoji       = $script:TitleEmoji
-			titlePresetIndex = $script:TitlePresetIndex
-			activeDialog     = $null
-			activeSubDialog  = $null
+	# Viewer visual state — preserved across viewer sessions and sent in welcome message
+	$_viewerVisualState = @{
+		outputMode       = $script:Output
+		previousView     = $null
+		windowTitle      = $script:WindowTitle
+		titleEmoji       = $script:TitleEmoji
+		titlePresetIndex = $script:TitlePresetIndex
+		activeDialog     = $null
+		activeSubDialog  = $null
+	}
+
+	# Pipe sync scriptblock for Invoke-GlobalHotkeyAction; closure over this scope so it reads
+	# live values of $viewerConnected, $pipeWriter, and $_pendingWriteFlush.
+	$_wPipeSyncSB = {
+		param([hashtable]$msg)
+		if (-not $viewerConnected -or $null -eq $pipeWriter) { return }
+		if ($msg.type -eq 'stopped') {
+			try { Send-PipeMessage -Writer $pipeWriter -Message $msg } catch {}
+		} else {
+			try { $null = Send-PipeMessageNonBlocking -Writer $pipeWriter -Message $msg -PendingFlush ([ref]$_pendingWriteFlush) } catch {}
 		}
+	}.GetNewClosure()
 
 			try {
 				:workerLoop while ($true) {
@@ -132,11 +142,24 @@
 				$tickCount = [math]::Max(1, [math]::Floor($intervalMs / 50))
 				$workerLastPos = Get-MousePosition
 				
-				# Wait loop - 50ms ticks
-				for ($tick = 0; $tick -lt $tickCount; $tick++) {
-						$date = Get-Date
-						
-						# Check for new viewer connection
+			# Wait loop - 50ms ticks
+			for ($tick = 0; $tick -lt $tickCount; $tick++) {
+					$date = Get-Date
+					
+					# Cooldown derived from unified activity clock; state message and SkipUpdate both read these
+					$cooldownActive = $false
+					$secondsRemaining = 0
+					if ($script:AutoResumeDelaySeconds -gt 0 -and $script:_CooldownArmed) {
+						$_sinceInputTick = ($date - $script:LastUserActivityTime).TotalSeconds
+						if ($_sinceInputTick -lt $script:AutoResumeDelaySeconds) {
+							$cooldownActive = $true
+							$secondsRemaining = [Math]::Ceiling($script:AutoResumeDelaySeconds - $_sinceInputTick)
+						} else {
+							$script:_CooldownArmed = $false
+						}
+					}
+					
+					# Check for new viewer connection
 						if (-not $viewerConnected -and $connectResult.IsCompleted) {
 							try {
 								$pipeServer.EndWaitForConnection($connectResult)
@@ -367,27 +390,26 @@
 								}
 								Update-TrayPauseLabel -Paused $manualPause
 							}
-					'displaySleep' {
-						$_displaySleepMode = [bool]$msg.active
-						# Viewer wake/sleep ownership: keep idle clock fresh so headless auto-sleep re-arms correctly after disconnect
-						if (-not $_displaySleepMode) { $_dsLastInputTime = Get-Date }
-					}
-					'displaySleepSettings' {
-						$_dsAutoEnabled     = [bool]$msg.autoEnabled
-						$_dsAutoTimeoutSecs = [int]$msg.autoTimeoutSecs
-						$script:DisplaySleepAutoEnabled     = $_dsAutoEnabled
-						$script:DisplaySleepAutoTimeoutSecs = $_dsAutoTimeoutSecs
-						$script:DisplaySleepAudioEnabled    = [bool]$msg.audioEnabled
-						$_dsLastInputTime = Get-Date
-					}
-									'quit' {
-										if ($viewerConnected) {
-											try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'quit' } } catch {}
-										}
-										if ($_displaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $_displaySleepMode = $false }
-										Show-Notification -Body "Stopped" -Action quit
-										return
+				'displaySleep' {
+					$_displaySleepMode = [bool]$msg.active
+					# Viewer wake/sleep ownership: keep idle clock fresh so headless auto-sleep re-arms correctly after disconnect
+					if (-not $_displaySleepMode) { $script:LastUserActivityTime = Get-Date }
+				}
+				'displaySleepSettings' {
+					$_dsAutoEnabled     = [bool]$msg.autoEnabled
+					$_dsAutoTimeoutSecs = [int]$msg.autoTimeoutSecs
+					$script:DisplaySleepAutoEnabled     = $_dsAutoEnabled
+					$script:DisplaySleepAutoTimeoutSecs = $_dsAutoTimeoutSecs
+					$script:DisplaySleepAudioEnabled    = [bool]$msg.audioEnabled
+					$script:LastUserActivityTime = Get-Date
+				}
+								'quit' {
+									if ($viewerConnected) {
+										try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'quit' } } catch {}
 									}
+									Show-Notification -Body "Stopped" -Action quit
+									return
+								}
 									}
 									$msg = Read-PipeMessage -Reader $pipeReader -PendingTask ([ref]$_workerReadTask)
 								}
@@ -411,92 +433,44 @@
 					}
 						
 					# Global hotkey polling — worker always polls, forwards state via pipe when viewer is connected
-					$_wGlobalAction = $null
-						try { $_wGlobalAction = Test-GlobalHotkey } catch {}
-						if ($_wGlobalAction -eq 'togglePause') {
-						try {
-							$manualPause = -not $manualPause
-							Update-TrayPauseLabel -Paused $manualPause
-							$_hotkeyBody = if ($manualPause) { "Paused" } else { "Resumed" }
-							$_hotkeyAction = if ($manualPause) { "paused" } else { "resumed" }
-							Show-Notification -Body $_hotkeyBody -Action $_hotkeyAction
-						$_pauseLogMsg = @{
-							type = 'log'
-							components = @(
-								@{ priority = 1; text = $date.ToString(); shortText = $date.ToString("HH:mm:ss") }
-									@{ priority = 2; text = " - $_hotkeyBody via hotkey"; shortText = " - $_hotkeyBody" }
-									)
-								}
-								if ($script:LogReplayBuffer.Count -ge 30) { $null = $script:LogReplayBuffer.Dequeue() }
-								$null = $script:LogReplayBuffer.Enqueue($_pauseLogMsg)
-								if ($viewerConnected) {
-									try { $null = Send-PipeMessageNonBlocking -Writer $pipeWriter -Message @{ type = 'togglePause'; paused = $manualPause; logMsg = $_pauseLogMsg } -PendingFlush ([ref]$_pendingWriteFlush) } catch {}
-								}
-							} catch {}
+				$_wGlobalAction = $null
+				try { $_wGlobalAction = Test-GlobalHotkey } catch {}
+				if ($null -ne $_wGlobalAction) {
+					try {
+						if (Invoke-GlobalHotkeyAction -Action $_wGlobalAction -Source hotkey -IsWorker `
+								-ManualPauseRef ([ref]$manualPause) -DisplaySleepModeRef ([ref]$_displaySleepMode) `
+								-Date $date -PipeSyncAction $_wPipeSyncSB) {
+							return
 						}
-					if ($_wGlobalAction -eq 'quit') {
-						try { Show-Notification -Body "Stopped" -Action quit } catch {}
-						if ($_displaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $_displaySleepMode = $false }
-						if ($viewerConnected) {
-							try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'quit' } } catch {}
-						}
-						return
-					}
-					if ($_wGlobalAction -eq 'toggleDisplaySleep') {
-						if (-not $_displaySleepMode) {
-							Start-Sleep -Milliseconds 500
-							$null = Invoke-DisplaySleep -Action Sleep
-							$_displaySleepMode = $true
-							if ($viewerConnected) {
-								try { $null = Send-PipeMessageNonBlocking -Writer $pipeWriter -Message @{ type = 'displaySleep'; active = $true } -PendingFlush ([ref]$_pendingWriteFlush) } catch {}
-							}
-						} else {
-							if (Invoke-DisplaySleep -Action Wake) {
-								$_displaySleepMode = $false
-								$_dsLastInputTime  = Get-Date
-								if ($viewerConnected) {
-									try { $null = Send-PipeMessageNonBlocking -Writer $pipeWriter -Message @{ type = 'displaySleep'; active = $false } -PendingFlush ([ref]$_pendingWriteFlush) } catch {}
-								}
-							}
+					} catch {
+						if ($script:DiagEnabled -and $script:NotifyDiagFile) {
+							"$(Get-Date -Format 'HH:mm:ss.fff') [HOTKEY-CATCH] $($_.Exception.GetType().Name): $($_.Exception.Message)" | Out-File $script:NotifyDiagFile -Append
 						}
 					}
+				}
 
-				# GetLastInputInfo idle check
-				try {
-					if ($script:MouseAPI::GetLastInputInfo([ref]$lii)) {
-						$tickNow = [uint64]$script:MouseAPI::GetTickCount64()
-						$systemIdleMs = $tickNow - [uint64]$lii.dwTime
-						$recentSimulated = ($null -ne $workerLastSimulatedKeyPress) -and ((Get-TimeSinceMs -StartTime $workerLastSimulatedKeyPress) -lt 500)
-						$recentAutoMove = (Get-TimeSinceMs -StartTime $workerLastAutomatedMouseMovement) -lt 500
-						if ($systemIdleMs -lt 300 -and -not $recentSimulated -and -not $recentAutoMove) {
-							$userInputDetected = $true
+			# LII idle check — shared classifier
+			$_workerTickDate = Get-Date
+			if (Test-UserInputActivity -LastSimulatedKeyPressTime $workerLastSimulatedKeyPress -LastAutomatedMouseMovementTime $workerLastAutomatedMouseMovement) {
+				Register-UserInput -Source Keyboard -Date $_workerTickDate -UserInputDetectedRef ([ref]$userInputDetected)
+				$_anyInputThisIteration = $true
+				$_iterHadKbInput = $true
+			}
+
+			# Mouse position tracking
+			try {
+				$currentCheckPos = Get-MousePosition
+				if ($null -ne $currentCheckPos -and $null -ne $workerLastPos) {
+					if (Test-MouseMoved -CurrentPos $currentCheckPos -LastPos $workerLastPos -Threshold 2) {
+						$_recentAutoMove = (Get-TimeSinceMs -StartTime $workerLastAutomatedMouseMovement) -lt 500
+						if (-not $_recentAutoMove) {
+							Register-UserInput -Source Mouse -Date $_workerTickDate -UserInputDetectedRef ([ref]$userInputDetected) -MouseDetectedRef ([ref]$mouseInputDetected)
 							$_anyInputThisIteration = $true
-							$_iterHadKbInput = $true
-							if ($script:AutoResumeDelaySeconds -gt 0) {
-								$workerLastUserInputTime = Get-Date
-							}
+							$_iterHadMsInput = $true
 						}
+						$workerLastPos = $currentCheckPos
 					}
-				} catch {}
-
-				# Mouse position tracking
-				try {
-					$currentCheckPos = Get-MousePosition
-					if ($null -ne $currentCheckPos -and $null -ne $workerLastPos) {
-						if (Test-MouseMoved -CurrentPos $currentCheckPos -LastPos $workerLastPos -Threshold 2) {
-							$recentAutoMove2 = (Get-TimeSinceMs -StartTime $workerLastAutomatedMouseMovement) -lt 500
-							if (-not $recentAutoMove2) {
-								$mouseInputDetected = $true
-								$userInputDetected = $true
-								$_anyInputThisIteration = $true
-								$_iterHadMsInput = $true
-								if ($script:AutoResumeDelaySeconds -gt 0) {
-									$workerLastUserInputTime = Get-Date
-								}
-							}
-							$workerLastPos = $currentCheckPos
-						}
-					}
+				}
 			} catch {}
 
 		# Display sleep wake check: when no viewer is connected, the worker handles
@@ -506,17 +480,15 @@
 		if ($_displaySleepMode -and $userInputDetected -and -not $viewerConnected) {
 			if (Invoke-DisplaySleep -Action Wake) {
 				$_displaySleepMode = $false
-				$_dsLastInputTime  = Get-Date
+				$script:LastUserActivityTime = $_workerTickDate
 			}
 			# On $false: Invoke-DisplaySleep played retry beep; flag stays set
 		}
 
-		# Update auto-sleep last-input timestamp when real user input was detected
-		if ($userInputDetected) { $_dsLastInputTime = Get-Date }
-
 		# Recurring auto-sleep when no viewer is connected and idle timeout has elapsed
+		# $script:LastUserActivityTime updated by Register-UserInput on every detection
 		if ($_dsAutoEnabled -and -not $_displaySleepMode -and -not $viewerConnected) {
-			$_dsIdleSecs = ((Get-Date) - $_dsLastInputTime).TotalSeconds
+			$_dsIdleSecs = ($_workerTickDate - $script:LastUserActivityTime).TotalSeconds
 			if ($_dsIdleSecs -ge $_dsAutoTimeoutSecs) {
 				$null = Invoke-DisplaySleep -Action Sleep
 				$_displaySleepMode = $true
@@ -529,17 +501,8 @@
 							if ($userInputDetected -and -not $mouseInputDetected) {
 								$keyboardInputDetected = $true
 							}
-							try {
-							$_stateCooldown = $false
-								$_stateCooldownSecs = 0
-								if ($script:AutoResumeDelaySeconds -gt 0 -and $null -ne $workerLastUserInputTime) {
-									$_sinceInput = ((Get-Date) - $workerLastUserInputTime).TotalSeconds
-									if ($_sinceInput -lt $script:AutoResumeDelaySeconds) {
-										$_stateCooldown = $true
-										$_stateCooldownSecs = [Math]::Ceiling($script:AutoResumeDelaySeconds - $_sinceInput)
-									}
-								}
-							$_sendResult = Send-PipeMessageNonBlocking -Writer $pipeWriter -Message @{
+						try {
+						$_sendResult = Send-PipeMessageNonBlocking -Writer $pipeWriter -Message @{
 							type = 'state'
 							epoch = $_workerSettingsEpoch
 							intervalSeconds = $script:IntervalSeconds
@@ -550,8 +513,8 @@
 							travelVariance = $script:TravelVariance
 							autoResumeDelaySeconds = $script:AutoResumeDelaySeconds
 							loopIteration = $workerLoopIteration
-							cooldownActive = $_stateCooldown
-							cooldownRemaining = $_stateCooldownSecs
+						cooldownActive = $cooldownActive
+						cooldownRemaining = $secondsRemaining
 							endTimeStr = $endTimeStr
 							endTimeInt = $endTimeInt
 							end = $end
@@ -570,7 +533,7 @@
 					statsMinMoveDist          = $workerStatsMinMoveDist
 					statsMaxMoveDist          = $workerStatsMaxMoveDist
 					statsLastMoveDurationMs   = $workerLastSuccessMoveDurationMs
-					statsLastMoveSecondsAgo   = if ($null -ne $workerLastSuccessMovementTime) { [int]((Get-Date) - $workerLastSuccessMovementTime).TotalSeconds } else { $null }
+					statsLastMoveSecondsAgo   = if ($null -ne $workerLastSuccessMovementTime) { [int]($_workerTickDate - $workerLastSuccessMovementTime).TotalSeconds } else { $null }
 						statsKbInterruptCount     = $workerStatsKbInterruptCount
 						statsMsInterruptCount     = $workerStatsMsInterruptCount
 						statsLongestCleanStreak   = $workerStatsLongestCleanStreak
@@ -644,55 +607,34 @@
 							} catch {}
 								}
 							}
-					'toggle' {
-						try {
-							$manualPause = -not $manualPause
-							try { Update-TrayPauseLabel -Paused $manualPause } catch {}
-							$_toggleBody = if ($manualPause) { "Paused" } else { "Resumed" }
-							$_toggleAction = if ($manualPause) { "paused" } else { "resumed" }
-							Show-Notification -Body $_toggleBody -Action $_toggleAction
-								$_pauseLogMsg = @{
-									type = 'log'
-									components = @(
-										@{ priority = 1; text = $date.ToString(); shortText = $date.ToString('HH:mm:ss') }
-										@{ priority = 2; text = " - $_toggleBody via tray"; shortText = " - $_toggleBody" }
-									)
-								}
-								if ($script:LogReplayBuffer.Count -ge 30) { $null = $script:LogReplayBuffer.Dequeue() }
-								$null = $script:LogReplayBuffer.Enqueue($_pauseLogMsg)
-								if ($viewerConnected) {
-									try { $null = Send-PipeMessageNonBlocking -Writer $pipeWriter -Message @{ type = 'togglePause'; paused = $manualPause; logMsg = $_pauseLogMsg } -PendingFlush ([ref]$_pendingWriteFlush) } catch {}
-								}
-						} catch {
-							if ($script:DiagEnabled -and $script:NotifyDiagFile) {
-								"$(Get-Date -Format 'HH:mm:ss.fff') [TOGGLE-CATCH] $($_.Exception.GetType().Name): $($_.Exception.Message)" | Out-File $script:NotifyDiagFile -Append
-							}
-						}
-					}
-						'quit' {
-							try { Show-Notification -Body "Stopped" -Action quit } catch {}
-							if ($_displaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $_displaySleepMode = $false }
-							if ($viewerConnected) {
-								try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'quit' } } catch {}
-							}
+				'toggle' {
+					try {
+						if (Invoke-GlobalHotkeyAction -Action togglePause -Source tray -IsWorker `
+								-ManualPauseRef ([ref]$manualPause) -DisplaySleepModeRef ([ref]$_displaySleepMode) `
+								-Date $date -PipeSyncAction $_wPipeSyncSB) {
 							return
 						}
+					} catch {
+						if ($script:DiagEnabled -and $script:NotifyDiagFile) {
+							"$(Get-Date -Format 'HH:mm:ss.fff') [TOGGLE-CATCH] $($_.Exception.GetType().Name): $($_.Exception.Message)" | Out-File $script:NotifyDiagFile -Append
 						}
 					}
+				}
+				'quit' {
+					if (Invoke-GlobalHotkeyAction -Action quit -Source tray -IsWorker `
+							-ManualPauseRef ([ref]$manualPause) -DisplaySleepModeRef ([ref]$_displaySleepMode) `
+							-Date $date -PipeSyncAction $_wPipeSyncSB) {
+						return
+					}
+				}
+				}
+			}
 
 					Start-Sleep -Milliseconds 50
 				}
 					
-					# Auto-resume delay check
-					if ($script:AutoResumeDelaySeconds -gt 0 -and $null -ne $workerLastUserInputTime) {
-						$timeSinceInput = ((Get-Date) - $workerLastUserInputTime).TotalSeconds
-						if ($timeSinceInput -lt $script:AutoResumeDelaySeconds) {
-							$cooldownActive = $true
-							$secondsRemaining = [Math]::Ceiling($script:AutoResumeDelaySeconds - $timeSinceInput)
-						}
-					}
-					
-				$_isFirstWorkerRun = ($workerLoopIteration -eq 1)
+			# $cooldownActive and $secondsRemaining were computed every tick inside the wait loop
+			$_isFirstWorkerRun = ($workerLoopIteration -eq 1)
 				$SkipUpdate = $_anyInputThisIteration -or $cooldownActive -or $_isFirstWorkerRun -or $manualPause
 				
 				if (-not $SkipUpdate) {
@@ -768,11 +710,11 @@
 							}
 						}
 						
-					$workerLastMovementTime = Get-Date
+				$workerLastMovementTime = $_workerTickDate
 
-				if (-not $movementAborted) {
-					# Record timing for successful move (used in state message display)
-					$workerLastSuccessMovementTime   = Get-Date
+			if (-not $movementAborted) {
+				# Record timing for successful move (used in state message display)
+				$workerLastSuccessMovementTime   = $_workerTickDate
 					$workerLastSuccessMoveDurationMs = $workerLastMovementDurationMs
 
 					# Successful move — update worker cumulative stats
@@ -798,10 +740,10 @@
 
 						# Actual interval between consecutive moves
 						if ($null -ne $workerStatsLastMoveTick) {
-							$_wActualSecs = ((Get-Date) - $workerStatsLastMoveTick).TotalSeconds
-							$workerStatsAvgActualIntervalSecs = if ($workerStatsMoveCount -le 1) { $_wActualSecs } else { ($workerStatsAvgActualIntervalSecs * ($workerStatsMoveCount - 1) + $_wActualSecs) / $workerStatsMoveCount }
-						}
-						$workerStatsLastMoveTick = Get-Date
+					$_wActualSecs = ($_workerTickDate - $workerStatsLastMoveTick).TotalSeconds
+						$workerStatsAvgActualIntervalSecs = if ($workerStatsMoveCount -le 1) { $_wActualSecs } else { ($workerStatsAvgActualIntervalSecs * ($workerStatsMoveCount - 1) + $_wActualSecs) / $workerStatsMoveCount }
+					}
+					$workerStatsLastMoveTick = $_workerTickDate
 
 						# Move streak
 						if ($workerStatsCurrentStreak -ge 0) { $workerStatsCurrentStreak++ } else { $workerStatsCurrentStreak = 1 }
@@ -872,11 +814,10 @@
 				$currentDateTimeInt = [int]($date.ToString("MMddHHmm"))
 				$endDateTimeInt = [int]$end
 				if ($currentDateTimeInt -ge $endDateTimeInt) {
-					if ($viewerConnected) {
-						try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'endtime' } } catch {}
-					}
-					if ($_displaySleepMode) { try { $null = Invoke-DisplaySleep -Action Wake } catch {}; $_displaySleepMode = $false }
-					Show-Notification -Body "End time reached" -Action endtime
+				if ($viewerConnected) {
+					try { Send-PipeMessage -Writer $pipeWriter -Message @{ type = 'stopped'; reason = 'endtime' } } catch {}
+				}
+				Show-Notification -Body "End time reached" -Action endtime
 					return
 				}
 			}

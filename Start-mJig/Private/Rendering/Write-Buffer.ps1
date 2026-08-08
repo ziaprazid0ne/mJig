@@ -9,8 +9,8 @@
 			[switch]$NoWrap
 		)
 		if ($Wide -and $null -ne $BG) { $Text = $Text + " " }
-		$fgCode = if ($null -ne $FG) { $script:AnsiFG[[ConsoleColor]$FG] } else { 39 }
-		$bgCode = if ($null -ne $BG) { $script:AnsiBG[[ConsoleColor]$BG] } else { 49 }
+	$fgCode = if ($null -ne $FG -and $FG -ne '') { $script:AnsiFG[[ConsoleColor]$FG] } else { 39 }
+	$bgCode = if ($null -ne $BG -and $BG -ne '') { $script:AnsiBG[[ConsoleColor]$BG] } else { 49 }
 		$isNoWrap    = $NoWrap.IsPresent
 		$renderQueue = $script:RenderQueue
 		if (-not $isNoWrap -and $X -eq -1 -and $Y -eq -1 -and $renderQueue.Count -gt 0) {

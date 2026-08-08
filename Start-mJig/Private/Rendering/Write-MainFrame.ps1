@@ -17,11 +17,106 @@
 		$_mrBg = $script:MenuRowBg
 		$Rows = [math]::Max(1, $HostHeight - 4 - 2 * $_bpV)
 
-		# Safety: ensure LogArray has exactly $Rows entries
-		while ($LogArray.Count -lt $Rows) { $LogArray.Insert(0, [PSCustomObject]@{ logRow = $true; components = @() }) }
-		while ($LogArray.Count -gt $Rows) { $LogArray.RemoveAt(0) }
+	# Safety: ensure LogArray has exactly $Rows entries
+	while ($LogArray.Count -lt $Rows) { $LogArray.Insert(0, [PSCustomObject]@{ logRow = $true; components = @() }) }
+	while ($LogArray.Count -gt $Rows) { $LogArray.RemoveAt(0) }
 
-	$date = if ($null -ne $Date) { $Date } else { Get-Date }
+	# Layout cache: rebuild geometry only when dimensions, theme, mode, title, or sleep icon change
+	$_layoutStamp = "$HostWidth|$HostHeight|$Output|$($script:CurrentThemeName)|$($script:TitlePresetIndex)|$($script:DisplaySleepMode -as [int])|$($DebugMode -as [int])"
+	if ($null -eq $script:_FrameLayout -or $script:_FrameLayout._stamp -ne $_layoutStamp) {
+		# Stats / log geometry
+		$boxWidth              = 60
+		$boxPadding            = 2
+		$verticalSeparatorWidth = 3
+		$showStatsBox          = ($Output -eq "full" -and $HostWidth -ge ($boxWidth + $boxPadding + $verticalSeparatorWidth + 50 + 2 * $_bpH))
+		$logWidth              = if ($showStatsBox) { $HostWidth - 2 * $_bpH - $boxWidth - $boxPadding - $verticalSeparatorWidth + 1 } else { $HostWidth - 2 * $_bpH + 1 }
+		$logStartX             = [math]::Max(0, $_bpH - 2)
+		# Menu items list
+		$_mEmojiLock        = $script:LockEmoji
+		$_mEmojiGear        = $script:GearEmoji
+		$_mEmojiRedX        = $script:RedXEmoji
+		$_mEmojiZzz         = [char]::ConvertFromUtf32(0x1F4A4)
+		$_mEmojiMoon        = [char]::ConvertFromUtf32(0x1F311)
+		$_mEmojiDisplay     = @($_mEmojiZzz, $_mEmojiMoon)[$script:DisplaySleepMode -as [int]]
+		$menuItemsList = @(
+			@{ full = "$_mEmojiGear|(S)ettings"; noIcons = "(S)ettings"; short = "(S)et"; isSettingsButton = $true },
+			@{ full = "$_mEmojiLock|(I)ncognito"; noIcons = "(I)ncognito"; short = "(I)nc" }
+		)
+		$menuItemsList += @{ full = "$_mEmojiDisplay|(d)isplay"; noIcons = "(d)isplay"; short = "(d)dsp" }
+		$menuItemsList += @{ full = "$_mEmojiRedX|(Q)uit"; noIcons = "(Q)uit"; short = "(Q)uit" }
+		# Menu format widths
+		$menuIconWidth    = if ($script:MenuButtonShowIcon)     { 2 + $script:MenuButtonSeparator.Length } else { 0 }
+		$menuBracketWidth = if ($script:MenuButtonShowBrackets) { 2 } else { 0 }
+		$hotkeyParenAdj   = if ($script:MenuButtonShowHotkeyParens) { 0 } else { -2 }
+		$format0Width = 2; $format1Width = 2; $format2Width = 2
+		foreach ($_mItem in $menuItemsList) {
+			$_mTxt = $_mItem.full -replace "^.+\|", ""
+			$format0Width += $menuIconWidth + $_mTxt.Length + $hotkeyParenAdj + $menuBracketWidth + 2
+			$format1Width += $_mItem.noIcons.Length + $hotkeyParenAdj + 2
+			$format2Width += $_mItem.short.Length + $hotkeyParenAdj + 1
+		}
+		$format0Width += 2; $format1Width += 2; $format2Width += 2
+		$helpButtonWidth = 0
+		if ($Output -eq "full") {
+			$helpButtonWidth = $menuBracketWidth + 1
+			$format0Width   += $helpButtonWidth + 2
+			$format1Width   += $helpButtonWidth + 2
+		}
+		$menuFormat = 0
+		if ($HostWidth -lt $format0Width) { if ($HostWidth -lt $format1Width) { $menuFormat = 2 } else { $menuFormat = 1 } }
+		$quitItem = $menuItemsList[$menuItemsList.Count - 1]
+		if ($menuFormat -eq 0) {
+			$_mQTxt   = $quitItem.full -replace "^.+\|", ""
+			$quitWidth = $menuIconWidth + $_mQTxt.Length + $hotkeyParenAdj + $menuBracketWidth
+		} elseif ($menuFormat -eq 1) {
+			$quitWidth = $quitItem.noIcons.Length + $hotkeyParenAdj
+		} else {
+			$quitWidth = $quitItem.short.Length + $hotkeyParenAdj
+		}
+		# Store in cache
+		$script:_FrameLayout = @{
+			_stamp                 = $_layoutStamp
+			boxWidth               = $boxWidth
+			boxPadding             = $boxPadding
+			verticalSeparatorWidth = $verticalSeparatorWidth
+			showStatsBox           = $showStatsBox
+			logWidth               = $logWidth
+			logStartX              = $logStartX
+			menuItemsList          = $menuItemsList
+			menuIconWidth          = $menuIconWidth
+			menuBracketWidth       = $menuBracketWidth
+			hotkeyParenAdj         = $hotkeyParenAdj
+			format0Width           = $format0Width
+			format1Width           = $format1Width
+			format2Width           = $format2Width
+			helpButtonWidth        = $helpButtonWidth
+			menuFormat             = $menuFormat
+			quitItem               = $quitItem
+			quitWidth              = $quitWidth
+		}
+	} else {
+		# Load from cache
+		$boxWidth              = $script:_FrameLayout.boxWidth
+		$boxPadding            = $script:_FrameLayout.boxPadding
+		$verticalSeparatorWidth = $script:_FrameLayout.verticalSeparatorWidth
+		$showStatsBox          = $script:_FrameLayout.showStatsBox
+		$logWidth              = $script:_FrameLayout.logWidth
+		$logStartX             = $script:_FrameLayout.logStartX
+		$menuItemsList         = $script:_FrameLayout.menuItemsList
+		$menuIconWidth         = $script:_FrameLayout.menuIconWidth
+		$menuBracketWidth      = $script:_FrameLayout.menuBracketWidth
+		$hotkeyParenAdj        = $script:_FrameLayout.hotkeyParenAdj
+		$format0Width          = $script:_FrameLayout.format0Width
+		$format1Width          = $script:_FrameLayout.format1Width
+		$format2Width          = $script:_FrameLayout.format2Width
+		$helpButtonWidth       = $script:_FrameLayout.helpButtonWidth
+		$menuFormat            = $script:_FrameLayout.menuFormat
+		$quitItem              = $script:_FrameLayout.quitItem
+		$quitWidth             = $script:_FrameLayout.quitWidth
+	}
+	$menuItems = $menuItemsList
+
+$date = if ($null -ne $Date) { $Date } else { Get-Date }
 
 		# Track screen state
 		$script:CurrentScreenState = if ($Output -eq "hidden") { "hidden" } else { "main" }
@@ -167,15 +262,8 @@
 		if ($_bpH -gt 1) { Write-Buffer -X ($HostWidth-$_bpH+1) -Y $Outputline -Text (" " * ($_bpH - 1)) }  # transparent right outer
 			$outputLine++
 
-			# Only render console if not skipping updates (prevents stutter during mouse movement)
-			if (-not $skipConsoleUpdate) {
-			# Calculate view-dependent variables INSIDE the skip check to ensure they use current $Output value
-			# This prevents stale view calculations when console updates resume after mouse movement
-			$boxWidth = 60  # Width for stats box
-			$boxPadding = 2  # Padding around box (1 space on each side)
-			$verticalSeparatorWidth = 3  # " $($script:BoxVertical) " = 3 characters
-		$showStatsBox = ($Output -eq "full" -and $HostWidth -ge ($boxWidth + $boxPadding + $verticalSeparatorWidth + 50 + 2 * $_bpH))  # Need at least 50 chars for logs + padding
-		$logWidth = if ($showStatsBox) { $HostWidth - 2 * $_bpH - $boxWidth - $boxPadding - $verticalSeparatorWidth + 1 } else { $HostWidth - 2 * $_bpH + 1 }  # +1 extends right boundary to group-bg char
+		# Only render console if not skipping updates (prevents stutter during mouse movement)
+		if (-not $skipConsoleUpdate) {
 			
 		# Pre-calculate key text splitting for full view
 				$keysFirstLine = ""
@@ -502,10 +590,9 @@
 			}
 			# ---- End stats pre-computation ----------------------------------------------
 
-			for ($i = 0; $i -lt $Rows; $i++) {
-			$rowY = $Outputline + $i
-		$logStartX      = [math]::Max(0, $_bpH - 2)
 		$availableWidth = [math]::Min($logWidth + 2, $HostWidth - $logStartX)
+		for ($i = 0; $i -lt $Rows; $i++) {
+		$rowY = $Outputline + $i
 					
 					$hasLogEntry = ($i -lt $LogArray.Count -and $null -ne $LogArray[$i] -and $null -ne $LogArray[$i].components)
 					$hasContent = ($hasLogEntry -and $LogArray[$i].components.Count -gt 0)
@@ -831,86 +918,7 @@
 		if ($_bpH -gt 1) { Write-Buffer -X ($HostWidth-$_bpH+1) -Y $Outputline -Text (" " * ($_bpH - 1)) }  # transparent right outer
 			$outputLine++
 
-		## Menu Options ##
-	$emojiLock    = $script:LockEmoji
-	$emojiGear    = $script:GearEmoji
-	$emojiRedX    = $script:RedXEmoji
-	$emojiZzz     = [char]::ConvertFromUtf32(0x1F4A4)  # 💤
-	$emojiMoon    = [char]::ConvertFromUtf32(0x1F311)  # 🌑
-	$emojiDisplayIcon = @($emojiZzz, $emojiMoon)[$script:DisplaySleepMode -as [int]]
-		
-	$menuItemsList = @(
-		@{
-			full             = "$emojiGear|(S)ettings"
-			noIcons          = "(S)ettings"
-			short            = "(S)et"
-			isSettingsButton = $true
-		},
-		@{
-			full    = "$emojiLock|(I)ncognito"
-			noIcons = "(I)ncognito"
-			short   = "(I)nc"
-		}
-	)
-	$menuItemsList += @{
-		full    = "$emojiDisplayIcon|(d)isplay"
-		noIcons = "(d)isplay"
-		short   = "(d)dsp"
-	}
-
-		$menuItemsList += @{
-			full    = "$emojiRedX|(Q)uit"
-			noIcons = "(Q)uit"
-			short   = "(Q)uit"
-		}
-
-			$menuItems = $menuItemsList
-				
-		# Calculate widths for each format (emojis = 2 display chars)
-		$menuIconWidth    = if ($script:MenuButtonShowIcon)    { 2 + $script:MenuButtonSeparator.Length } else { 0 }
-		$menuBracketWidth = if ($script:MenuButtonShowBrackets) { 2 } else { 0 }
-		$hotkeyParenAdj   = if ($script:MenuButtonShowHotkeyParens) { 0 } else { -2 }
-		$format0Width = 2  # Leading spaces
-		$format1Width = 2
-		$format2Width = 2
-		
-		foreach ($item in $menuItems) {
-			$textPart = $item.full -replace "^.+\|", ""
-			$format0Width += $menuIconWidth + $textPart.Length + $hotkeyParenAdj + $menuBracketWidth + 2
-			$format1Width += $item.noIcons.Length + $hotkeyParenAdj + 2
-			$format2Width += $item.short.Length + $hotkeyParenAdj + 1
-		}
-			
-			$format0Width += 2
-			$format1Width += 2
-			$format2Width += 2
-
-			# ? help button contributes to format 0 and 1 only (hidden in format 2 / short mode)
-			$helpButtonWidth = 0
-			if ($Output -eq "full") {
-				$helpButtonWidth = $menuBracketWidth + 1  # "?" char + optional brackets
-				$format0Width += $helpButtonWidth + 2    # +2 for trailing spaces
-				$format1Width += $helpButtonWidth + 2
-			}
-
-			$menuFormat = 0
-			if ($HostWidth -lt $format0Width) {
-				if ($HostWidth -lt $format1Width) {
-					$menuFormat = 2
-				} else {
-					$menuFormat = 1
-				}
-			}
-			
-		$quitItem = $menuItems[$menuItems.Count - 1]
-		if ($menuFormat -eq 0) {
-			$textPart = $quitItem.full -replace "^.+\|", ""
-			$quitWidth = $menuIconWidth + $textPart.Length + $hotkeyParenAdj + $menuBracketWidth
-			} elseif ($menuFormat -eq 1) {
-				$quitWidth = $quitItem.noIcons.Length + $hotkeyParenAdj
-			} else {
-				$quitWidth = $quitItem.short.Length + $hotkeyParenAdj
-			}
+	## Menu Options ## (geometry loaded from layout cache at top of function)
 				
 		# Clear pressed-button state after action (immediate or after dialog close; skip while dialog is open)
 		if ($script:PendingDialogCheck -and $null -ne $script:PressedMenuButton) {

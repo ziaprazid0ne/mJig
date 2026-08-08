@@ -30,30 +30,11 @@ $redX = [char]::ConvertFromUtf32(0x274C)
 $buttonLayout = Get-DialogButtonLayout
 $dialogIconWidth = $buttonLayout.IconWidth; $dialogBracketWidth = $buttonLayout.BracketWidth; $dialogParenOffset = $buttonLayout.ParenAdjustment
 $bottomLinePadding = $dialogWidth - (13 + 2 * $dialogParenOffset + 2 * $dialogIconWidth + 2 * $dialogBracketWidth) - 1
-	$line0 =  "$($script:BoxTopLeft)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxTopRight)"  # 35 chars
-			$line1Text = "$($script:BoxVertical)  Confirm Quit"
-			$line1Padding = Get-Padding -UsedWidth ($line1Text.Length + 1) -TotalWidth $dialogWidth
-			$line1 = $line1Text + (" " * $line1Padding) + "$($script:BoxVertical)"
-			
-			$line2 = "$($script:BoxVertical)" + (" " * 33) + "$($script:BoxVertical)"  # 35 chars
-			
-			$line3Text = "$($script:BoxVertical)  Are you sure you want to quit?"
-			$line3Padding = Get-Padding -UsedWidth ($line3Text.Length + 1) -TotalWidth $dialogWidth
-			$line3 = $line3Text + (" " * $line3Padding) + "$($script:BoxVertical)"
-			
-			$line4 = "$($script:BoxVertical)" + (" " * 33) + "$($script:BoxVertical)"  # 35 chars
-			$line5 = "$($script:BoxVertical)" + (" " * 33) + "$($script:BoxVertical)"  # 35 chars
-			
-			$dialogLines = @(
-				$line0,
-				$line1,
-				$line2,
-				$line3,
-				$line4,
-				$line5,
-				$null,  # Bottom line will be written separately with colors
-				"$($script:BoxBottomLeft)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxHorizontal)$($script:BoxBottomRight)"  # 35 chars
-			)
+		$_bv      = [string]$script:BoxVertical
+		$_hLine   = [string]$script:BoxHorizontal
+		$_inner   = $dialogWidth - 2
+		$line0      = $script:BoxTopLeft    + ($_hLine * $_inner) + $script:BoxTopRight
+		$lineBottom = $script:BoxBottomLeft + ($_hLine * $_inner) + $script:BoxBottomRight
 			
 	# Slide-up animation: reveal rows progressively from behind the menu bar
 	$clipY        = $menuBarY - 1   # separator row — nothing drawn at or below this Y
@@ -75,7 +56,7 @@ $bottomLinePadding = $dialogWidth - (13 + 2 * $dialogParenOffset + 2 * $dialogIc
 					if ($r -eq 0) {
 						Write-Buffer -X $dialogX -Y $rowY -Text $line0 -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
 					} elseif ($r -eq $dialogHeight) {
-						Write-Buffer -X $dialogX -Y $rowY -Text $dialogLines[$dialogLines.Count - 1] -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
+						Write-Buffer -X $dialogX -Y $rowY -Text $lineBottom -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
 					} else {
 						Write-Buffer -X $dialogX                      -Y $rowY -Text $script:BoxVertical -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
 						Write-Buffer -X ($dialogX + $dialogWidth - 1) -Y $rowY -Text $script:BoxVertical -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
@@ -103,62 +84,35 @@ $bottomLinePadding = $dialogWidth - (13 + 2 * $dialogParenOffset + 2 * $dialogIc
 				}
 			}
 
-			# Draw dialog background (clear area) with magenta background
-			for ($i = 0; $i -lt $dialogHeight; $i++) {
-				Write-Buffer -X $dialogX -Y ($dialogY + $i) -Text (" " * $dialogWidth) -BG DarkMagenta
-			}
-			
-			# Draw dialog box with themed background
-			for ($i = 0; $i -lt $dialogLines.Count; $i++) {
-				if ($i -eq 1) {
-					# Title line
-					Write-Buffer -X $dialogX -Y ($dialogY + $i) -Text "$($script:BoxVertical)  " -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
-					Write-Buffer -Text "Confirm Quit" -FG $script:QuitDialogTitle -BG $script:QuitDialogBg
-					$titleUsedWidth = 3 + "Confirm Quit".Length  # "$($script:BoxVertical)  " + title
-					$titlePadding = Get-Padding -UsedWidth ($titleUsedWidth + 1) -TotalWidth $dialogWidth
-					Write-Buffer -Text (" " * $titlePadding) -BG $script:QuitDialogBg
-					Write-Buffer -Text "$($script:BoxVertical)" -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
-			} elseif ($i -eq 6) {
-			# Bottom line - write with colored icons and hotkey letters
+		# Draw dialog background
+		for ($i = 0; $i -le $dialogHeight; $i++) {
+			Write-Buffer -X $dialogX -Y ($dialogY + $i) -Text (" " * $dialogWidth) -BG $script:QuitDialogBg
+		}
+
+		# Frame: top border + title + divider + bottom border
+		Write-DialogFrame -X $dialogX -Y $dialogY -Width $dialogWidth -Height $dialogHeight `
+			-Title "Confirm Quit" -BorderFG $script:QuitDialogBorder -TitleFG $script:QuitDialogTitle -BG $script:QuitDialogBg
+
+		# Row 3: prompt text
+		$line3Text    = "$_bv  Are you sure you want to quit?"
+		$line3Padding = Get-Padding -UsedWidth ($line3Text.Length + 1) -TotalWidth $dialogWidth
+		Write-Buffer -X $dialogX -Y ($dialogY + 3) -Text ($line3Text + (" " * $line3Padding) + $_bv) -FG $script:QuitDialogText -BG $script:QuitDialogBg
+
+		# Rows 4–5: blank
+		Write-Buffer -X $dialogX -Y ($dialogY + 4) -Text ($_bv + (" " * $_inner) + $_bv) -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
+		Write-Buffer -X $dialogX -Y ($dialogY + 5) -Text ($_bv + (" " * $_inner) + $_bv) -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
+
+		# Row 6: buttons
 		$applyButtonX = $dialogX + 2
-		$cancelButtonX = $applyButtonX + $dialogBracketWidth + $dialogIconWidth + 5 + $dialogParenOffset + 2  # bracket + icon + "(y)es"(5) + gap(2)
-		Write-Buffer -X $dialogX -Y ($dialogY + $i) -Text "$($script:BoxVertical) " -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
-		if ($script:DialogButtonShowBrackets) {
-			Write-Buffer -X $applyButtonX -Y ($dialogY + $i) -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg
-		}
-		$applyButtonContentX = $applyButtonX + [int]$script:DialogButtonShowBrackets
-		if ($script:DialogButtonShowIcon) {
-			Write-Buffer -X $applyButtonContentX -Y ($dialogY + $i) -Text $checkmark -FG $script:TextSuccess -BG $script:QuitDialogButtonBg -Wide
-			Write-Buffer -X ($applyButtonContentX + 2) -Y ($dialogY + $i) -Text $script:DialogButtonSeparator -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg
-		} else {
-			Write-Buffer -X $applyButtonContentX -Y ($dialogY + $i) -Text "" -BG $script:QuitDialogButtonBg
-		}
-		if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg }
-		Write-Buffer -Text "y" -FG $script:QuitDialogButtonHotkey -BG $script:QuitDialogButtonBg
-		$closingParen = if ($script:DialogButtonShowHotkeyParens) { ")" } else { "" }
-		Write-Buffer -Text "$($closingParen)es" -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg
-		if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+		Write-Buffer -X $dialogX -Y ($dialogY + 6) -Text "$_bv " -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
+		$_yesW = Write-DialogButton -X $applyButtonX -Y ($dialogY + 6) -Hotkey "y" -Suffix "es" `
+			-Emoji $checkmark -EmojiColor $script:TextSuccess -TextColor $script:QuitDialogButtonText -BgColor $script:QuitDialogButtonBg -HotkeyColor $script:QuitDialogButtonHotkey
+		$cancelButtonX = $applyButtonX + $_yesW + 2
 		Write-Buffer -Text "  " -BG $script:QuitDialogBg
-		if ($script:DialogButtonShowBrackets) {
-			Write-Buffer -X $cancelButtonX -Y ($dialogY + $i) -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg
-		}
-		$cancelButtonContentX = $cancelButtonX + [int]$script:DialogButtonShowBrackets
-		if ($script:DialogButtonShowIcon) {
-			Write-Buffer -X $cancelButtonContentX -Y ($dialogY + $i) -Text $redX -FG $script:TextError -BG $script:QuitDialogButtonBg -Wide
-			Write-Buffer -X ($cancelButtonContentX + 2) -Y ($dialogY + $i) -Text $script:DialogButtonSeparator -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg
-		} else {
-			Write-Buffer -X $cancelButtonContentX -Y ($dialogY + $i) -Text "" -BG $script:QuitDialogButtonBg
-		}
-		if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg }
-		Write-Buffer -Text "n" -FG $script:QuitDialogButtonHotkey -BG $script:QuitDialogButtonBg
-		Write-Buffer -Text "$($closingParen)o" -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg
-		if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+		$null = Write-DialogButton -X $cancelButtonX -Y ($dialogY + 6) -Hotkey "n" -Suffix "o" `
+			-Emoji $redX -EmojiColor $script:TextError -TextColor $script:QuitDialogButtonText -BgColor $script:QuitDialogButtonBg -HotkeyColor $script:QuitDialogButtonHotkey
 		Write-Buffer -Text (" " * $bottomLinePadding) -BG $script:QuitDialogBg
-		Write-Buffer -Text "$($script:BoxVertical)" -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
-	} else {
-		Write-Buffer -X $dialogX -Y ($dialogY + $i) -Text $dialogLines[$i] -FG $script:QuitDialogText -BG $script:QuitDialogBg
-	}
-}
+		Write-Buffer -Text $_bv -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
 
 Flush-Buffer
 
@@ -179,9 +133,9 @@ $noButtonEndX    = $noButtonStartX + $dialogBracketWidth + $dialogIconWidth + 4 
 			}
 			$script:DialogButtonClick = $null
 			
-			# Get input
-			$result = $null
-			$needsRedraw = $false
+		# Get input
+		$result    = $false
+		$needsRedraw = $false
 			
 			:inputLoop do {
 				# Check for window resize and update references
@@ -189,12 +143,10 @@ $noButtonEndX    = $noButtonStartX + $dialogBracketWidth + $dialogIconWidth + 4 
 				$pswindow = $pshost.UI.RawUI
 				$newWindowSize = $pswindow.WindowSize
 				if ($newWindowSize.Width -ne $currentHostWidth -or $newWindowSize.Height -ne $currentHostHeight) {
-					$stableSize = Invoke-ResizeHandler -PreviousScreenState "dialog-quit"
-					$HostWidthRef.Value  = $stableSize.Width
-					$HostHeightRef.Value = $stableSize.Height
+					$stableSize = Invoke-DialogResize -HostWidthRef $HostWidthRef -HostHeightRef $HostHeightRef `
+						-ScreenState "dialog-quit"
 					$currentHostWidth  = $stableSize.Width
 					$currentHostHeight = $stableSize.Height
-					Write-MainFrame -Force -NoFlush
 					$needsRedraw = $true
 					
 				# Reposition dialog: right edge at first column of right-side border padding
@@ -203,56 +155,35 @@ $noButtonEndX    = $noButtonStartX + $dialogBracketWidth + $dialogIconWidth + 4 
 				$menuBarY = if ($null -ne $script:MenuBarY) { $script:MenuBarY } else { $currentHostHeight - 2 }
 				$dialogY = [math]::Max(0, $menuBarY - 2 - $dialogHeight)
 
-				for ($i = 0; $i -lt $dialogLines.Count; $i++) {
-						if ($i -eq 1) {
-							# Title line
-							Write-Buffer -X $dialogX -Y ($dialogY + $i) -Text "$($script:BoxVertical)  " -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
-							Write-Buffer -Text "Confirm Quit" -FG $script:QuitDialogTitle -BG $script:QuitDialogBg
-							$titleUsedWidth = 3 + "Confirm Quit".Length  # "$($script:BoxVertical)  " + title
-							$titlePadding = Get-Padding -UsedWidth ($titleUsedWidth + 1) -TotalWidth $dialogWidth
-							Write-Buffer -Text (" " * $titlePadding) -BG $script:QuitDialogBg
-							Write-Buffer -Text "$($script:BoxVertical)" -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
-					} elseif ($i -eq 6) {
-					# Bottom line - write with colored icons and hotkey letters
+			# Draw dialog background
+				for ($i = 0; $i -le $dialogHeight; $i++) {
+					Write-Buffer -X $dialogX -Y ($dialogY + $i) -Text (" " * $dialogWidth) -BG $script:QuitDialogBg
+				}
+
+				# Frame: top border + title + divider + bottom border
+				Write-DialogFrame -X $dialogX -Y $dialogY -Width $dialogWidth -Height $dialogHeight `
+					-Title "Confirm Quit" -BorderFG $script:QuitDialogBorder -TitleFG $script:QuitDialogTitle -BG $script:QuitDialogBg
+
+				# Row 3: prompt text
+				$_line3Text    = "$_bv  Are you sure you want to quit?"
+				$_line3Padding = Get-Padding -UsedWidth ($_line3Text.Length + 1) -TotalWidth $dialogWidth
+				Write-Buffer -X $dialogX -Y ($dialogY + 3) -Text ($_line3Text + (" " * $_line3Padding) + $_bv) -FG $script:QuitDialogText -BG $script:QuitDialogBg
+
+				# Rows 4–5: blank
+				Write-Buffer -X $dialogX -Y ($dialogY + 4) -Text ($_bv + (" " * $_inner) + $_bv) -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
+				Write-Buffer -X $dialogX -Y ($dialogY + 5) -Text ($_bv + (" " * $_inner) + $_bv) -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
+
+				# Row 6: buttons
 				$applyButtonX = $dialogX + 2
-				$cancelButtonX = $applyButtonX + $dialogBracketWidth + $dialogIconWidth + 5 + $dialogParenOffset + 2  # bracket + icon + "(y)es"(5) + gap(2)
-				Write-Buffer -X $dialogX -Y ($dialogY + $i) -Text "$($script:BoxVertical) " -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
-				if ($script:DialogButtonShowBrackets) {
-					Write-Buffer -X $applyButtonX -Y ($dialogY + $i) -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg
-				}
-				$applyButtonContentX = $applyButtonX + [int]$script:DialogButtonShowBrackets
-				if ($script:DialogButtonShowIcon) {
-					Write-Buffer -X $applyButtonContentX -Y ($dialogY + $i) -Text $checkmark -FG $script:TextSuccess -BG $script:QuitDialogButtonBg -Wide
-					Write-Buffer -X ($applyButtonContentX + 2) -Y ($dialogY + $i) -Text $script:DialogButtonSeparator -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg
-				} else {
-					Write-Buffer -X $applyButtonContentX -Y ($dialogY + $i) -Text "" -BG $script:QuitDialogButtonBg
-				}
-				if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg }
-				Write-Buffer -Text "y" -FG $script:QuitDialogButtonHotkey -BG $script:QuitDialogButtonBg
-				$closingParen = if ($script:DialogButtonShowHotkeyParens) { ")" } else { "" }
-				Write-Buffer -Text "$($closingParen)es" -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg
-				if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+				Write-Buffer -X $dialogX -Y ($dialogY + 6) -Text "$_bv " -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
+				$_yesW = Write-DialogButton -X $applyButtonX -Y ($dialogY + 6) -Hotkey "y" -Suffix "es" `
+					-Emoji $checkmark -EmojiColor $script:TextSuccess -TextColor $script:QuitDialogButtonText -BgColor $script:QuitDialogButtonBg -HotkeyColor $script:QuitDialogButtonHotkey
+				$cancelButtonX = $applyButtonX + $_yesW + 2
 				Write-Buffer -Text "  " -BG $script:QuitDialogBg
-				if ($script:DialogButtonShowBrackets) {
-					Write-Buffer -X $cancelButtonX -Y ($dialogY + $i) -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg
-				}
-				$cancelButtonContentX = $cancelButtonX + [int]$script:DialogButtonShowBrackets
-				if ($script:DialogButtonShowIcon) {
-					Write-Buffer -X $cancelButtonContentX -Y ($dialogY + $i) -Text $redX -FG $script:TextError -BG $script:QuitDialogButtonBg -Wide
-					Write-Buffer -X ($cancelButtonContentX + 2) -Y ($dialogY + $i) -Text $script:DialogButtonSeparator -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg
-				} else {
-					Write-Buffer -X $cancelButtonContentX -Y ($dialogY + $i) -Text "" -BG $script:QuitDialogButtonBg
-				}
-				if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg }
-				Write-Buffer -Text "n" -FG $script:QuitDialogButtonHotkey -BG $script:QuitDialogButtonBg
-				Write-Buffer -Text "$($closingParen)o" -FG $script:QuitDialogButtonText -BG $script:QuitDialogButtonBg
-				if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+				$null = Write-DialogButton -X $cancelButtonX -Y ($dialogY + 6) -Hotkey "n" -Suffix "o" `
+					-Emoji $redX -EmojiColor $script:TextError -TextColor $script:QuitDialogButtonText -BgColor $script:QuitDialogButtonBg -HotkeyColor $script:QuitDialogButtonHotkey
 				Write-Buffer -Text (" " * $bottomLinePadding) -BG $script:QuitDialogBg
-				Write-Buffer -Text "$($script:BoxVertical)" -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
-			} else {
-				Write-Buffer -X $dialogX -Y ($dialogY + $i) -Text $dialogLines[$i] -FG $script:QuitDialogText -BG $script:QuitDialogBg
-			}
-		}
+				Write-Buffer -Text $_bv -FG $script:QuitDialogBorder -BG $script:QuitDialogBg
 		
 		Flush-Buffer -ClearFirst
 		

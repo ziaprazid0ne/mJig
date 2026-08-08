@@ -20,18 +20,13 @@
 		$script:CursorVisible = $false
 		[Console]::Write("$($script:ESC)[?25l")
 
-		$buttonLayout      = Get-DialogButtonLayout
-		$dialogIconWidth   = $buttonLayout.IconWidth
+		$buttonLayout       = Get-DialogButtonLayout
+		$dialogIconWidth    = $buttonLayout.IconWidth
 		$dialogBracketWidth = $buttonLayout.BracketWidth
-		$dialogParenOffset = $buttonLayout.ParenAdjustment
-		# Next-theme button: bracket? + icon? + "(" + "n" + ")" + "ext theme" + trailing pad + "|"
-		$buttonLabelLength = 9 + 1 + 2 * [int]$script:DialogButtonShowHotkeyParens
-		$bottomLinePadding = $dialogWidth - 4 - $dialogParenOffset - $dialogBracketWidth - $dialogIconWidth - $buttonLabelLength
-
-		# Apply / Cancel button sizes
-		$applyBtnChars   = $dialogBracketWidth + $dialogIconWidth + 7 + $dialogParenOffset
-		$cancelBtnChars  = $dialogBracketWidth + $dialogIconWidth + 8 + $dialogParenOffset
-		$applyRowPadding = [math]::Max(0, $dialogWidth - 2 - $applyBtnChars - 2 - $cancelBtnChars - 1)
+		$_parenWidth        = if ($script:DialogButtonShowHotkeyParens) { 2 } else { 0 }
+		$_nextBtnW          = $dialogBracketWidth + $dialogIconWidth + $_parenWidth + 10  # "n" + "ext theme"
+		$_applyBtnW         = $dialogBracketWidth + $dialogIconWidth + $_parenWidth + 5   # "a" + "pply"
+		$_cancelBtnW        = $dialogBracketWidth + $dialogIconWidth + $_parenWidth + 6   # "c" + "ancel"
 
 		$paletteEmoji  = [char]::ConvertFromUtf32(0x1F3A8) # artist palette
 		$emojiApply    = [char]::ConvertFromUtf32(0x2705)  # checkmark
@@ -39,28 +34,20 @@
 
 		$drawThemeDialog = {
 			param($dx, $dy)
+			$_bv    = [string]$script:BoxVertical
 			$inner  = $dialogWidth - 2
-			$hLine  = [string]$script:BoxHorizontal
 
 			# Clear background
 			for ($i = 0; $i -le $dialogHeight; $i++) {
 				Write-Buffer -X $dx -Y ($dy + $i) -Text (" " * $dialogWidth) -BG $script:ThemeDialogBg
 			}
 
-			# — Line 0: top border -----------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 0) -Text ($script:BoxTopLeft + ($hLine * $inner) + $script:BoxTopRight) -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
-
-			# — Line 1: title ----------------------------------------------------
-			$titleText = "  Theme"
-			Write-Buffer -X $dx -Y ($dy + 1) -Text $script:BoxVertical -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
-			Write-Buffer -Text $titleText.PadRight($inner) -FG $script:ThemeDialogTitle -BG $script:ThemeDialogBg
-			Write-Buffer -Text $script:BoxVertical -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
-
-			# — Line 2: divider --------------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 2) -Text ($script:BoxVerticalRight + ($hLine * $inner) + $script:BoxVerticalLeft) -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
+			# — Lines 0/1/2/$dialogHeight: frame (top border + title + divider + bottom) --
+			Write-DialogFrame -X $dx -Y $dy -Width $dialogWidth -Height $dialogHeight `
+				-Title "Theme" -BorderFG $script:ThemeDialogBorder -TitleFG $script:ThemeDialogTitle -BG $script:ThemeDialogBg
 
 			# — Line 3: blank ----------------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 3) -Text ($script:BoxVertical + (" " * $inner) + $script:BoxVertical) -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
+			Write-Buffer -X $dx -Y ($dy + 3) -Text ($_bv + (" " * $inner) + $_bv) -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
 
 			# — Line 4: current theme name (centered) ----------------------------
 			$themeName   = if ($script:CurrentThemeName -ne "") { $script:CurrentThemeName } else { "default" }
@@ -72,57 +59,30 @@
 			Write-Buffer -Text $script:BoxVertical -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
 
 			# — Line 5: blank ----------------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 5) -Text ($script:BoxVertical + (" " * $inner) + $script:BoxVertical) -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
+			Write-Buffer -X $dx -Y ($dy + 5) -Text ($_bv + (" " * $inner) + $_bv) -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
 
 			# — Line 6: next-theme button ----------------------------------------
 			Write-Buffer -X $dx -Y ($dy + 6) -Text "$($script:BoxVertical) " -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "[" -FG $script:DialogButtonBracketFg -BG $script:ThemeDialogButtonBg }
-			if ($script:DialogButtonShowIcon) {
-				Write-Buffer -Text $paletteEmoji -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg
-				Write-Buffer -Text $script:DialogButtonSeparator -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg
-			}
-			if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg }
-			Write-Buffer -Text "n" -FG $script:ThemeDialogButtonHotkey -BG $script:ThemeDialogButtonBg
-			$closingParen = if ($script:DialogButtonShowHotkeyParens) { ")" } else { "" }
-			Write-Buffer -Text "${closingParen}ext theme" -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
-			Write-Buffer -Text (" " * $bottomLinePadding) -BG $script:ThemeDialogBg
+			$null = Write-DialogButton -X ($dx + 2) -Y ($dy + 6) -Hotkey "n" -Suffix "ext theme" `
+				-Emoji $paletteEmoji -EmojiColor $null -TextColor $script:ThemeDialogButtonText -BgColor $script:ThemeDialogButtonBg -HotkeyColor $script:ThemeDialogButtonHotkey
+			Write-Buffer -Text (" " * [math]::Max(0, $dialogWidth - 3 - $_nextBtnW)) -BG $script:ThemeDialogBg
 			Write-Buffer -Text $script:BoxVertical -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
 
 			# — Line 7: blank ----------------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 7) -Text ($script:BoxVertical + (" " * $inner) + $script:BoxVertical) -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
+			Write-Buffer -X $dx -Y ($dy + 7) -Text ($_bv + (" " * $inner) + $_bv) -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
 
 			# — Line 8: apply + cancel buttons -----------------------------------
 			$_applyX  = $dx + 2
-			$_cancelX = $_applyX + $applyBtnChars + 2
+			$_cancelX = $_applyX + $_applyBtnW + 2
 			Write-Buffer -X $dx -Y ($dy + 8) -Text "$($script:BoxVertical) " -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -X $_applyX -Y ($dy + 8) -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
-			$_applyContentX = $_applyX + [int]$script:DialogButtonShowBrackets
-			if ($script:DialogButtonShowIcon) {
-				Write-Buffer -X $_applyContentX -Y ($dy + 8) -Text $emojiApply -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg -Wide
-				Write-Buffer -X ($_applyContentX + 2) -Y ($dy + 8) -Text $script:DialogButtonSeparator -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg
-			} else { Write-Buffer -X $_applyContentX -Y ($dy + 8) -Text "" -BG $script:ThemeDialogButtonBg }
-			$_cp = if ($script:DialogButtonShowHotkeyParens) { ")" } else { "" }
-			if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg }
-			Write-Buffer -Text "a" -FG $script:ThemeDialogButtonHotkey -BG $script:ThemeDialogButtonBg
-			Write-Buffer -Text "${_cp}pply" -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+			$null = Write-DialogButton -X $_applyX -Y ($dy + 8) -Hotkey "a" -Suffix "pply" `
+				-Emoji $emojiApply -EmojiColor $null -TextColor $script:ThemeDialogButtonText -BgColor $script:ThemeDialogButtonBg -HotkeyColor $script:ThemeDialogButtonHotkey
 			Write-Buffer -Text "  " -BG $script:ThemeDialogBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -X $_cancelX -Y ($dy + 8) -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
-			$_cancelContentX = $_cancelX + [int]$script:DialogButtonShowBrackets
-			if ($script:DialogButtonShowIcon) {
-				Write-Buffer -X $_cancelContentX -Y ($dy + 8) -Text $emojiClose -FG $script:TextError -BG $script:ThemeDialogButtonBg -Wide
-				Write-Buffer -X ($_cancelContentX + 2) -Y ($dy + 8) -Text $script:DialogButtonSeparator -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg
-			} else { Write-Buffer -X $_cancelContentX -Y ($dy + 8) -Text "" -BG $script:ThemeDialogButtonBg }
-			if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg }
-			Write-Buffer -Text "c" -FG $script:ThemeDialogButtonHotkey -BG $script:ThemeDialogButtonBg
-			Write-Buffer -Text "${_cp}ancel" -FG $script:ThemeDialogButtonText -BG $script:ThemeDialogButtonBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
-			Write-Buffer -Text (" " * $applyRowPadding) -BG $script:ThemeDialogBg
+			$null = Write-DialogButton -X $_cancelX -Y ($dy + 8) -Hotkey "c" -Suffix "ancel" `
+				-Emoji $emojiClose -EmojiColor $script:TextError -TextColor $script:ThemeDialogButtonText -BgColor $script:ThemeDialogButtonBg -HotkeyColor $script:ThemeDialogButtonHotkey
+			Write-Buffer -Text (" " * [math]::Max(0, $dialogWidth - 3 - $_applyBtnW - 2 - $_cancelBtnW)) -BG $script:ThemeDialogBg
 			Write-Buffer -Text $script:BoxVertical -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
 
-			# — Line 9: bottom border --------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 9) -Text ($script:BoxBottomLeft + ($hLine * $inner) + $script:BoxBottomRight) -FG $script:ThemeDialogBorder -BG $script:ThemeDialogBg
 		}
 
 		# Send viewerState before opening
@@ -130,23 +90,22 @@
 			Send-PipeMessage -Writer $ViewerPipeWriter -Message @{ type='viewerState'; activeDialog='theme' }
 		}
 
-		# Save initial theme so Cancel can revert
-		$initialThemeName  = $script:CurrentThemeName
-		$initialThemeIndex = $script:CurrentThemeIndex
+		# Save initial theme name so Cancel can revert via Set-ThemeProfile
+		$initialThemeName = $script:CurrentThemeName
 
 		# Initial draw
 		& $drawThemeDialog $dialogX $dialogY
 		Write-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight -shadowColor $script:ThemeDialogShadow
 		Flush-Buffer
 
-		$nextButtonRowY   = $dialogY + 6
-		$nextButtonStartX = $dialogX + 2
-		$nextButtonEndX   = $nextButtonStartX + $dialogBracketWidth + $dialogIconWidth + $buttonLabelLength + $dialogParenOffset - 1
-		$applyButtonRowY  = $dialogY + 8
+		$nextButtonRowY     = $dialogY + 6
+		$nextButtonStartX   = $dialogX + 2
+		$nextButtonEndX     = $nextButtonStartX + $_nextBtnW - 1
+		$applyButtonRowY    = $dialogY + 8
 		$applyButtonStartX  = $dialogX + 2
-		$applyButtonEndX    = $applyButtonStartX + $applyBtnChars - 1
-		$cancelButtonStartX = $applyButtonStartX + $applyBtnChars + 2
-		$cancelButtonEndX   = $cancelButtonStartX + $cancelBtnChars - 1
+		$applyButtonEndX    = $applyButtonStartX + $_applyBtnW - 1
+		$cancelButtonStartX = $applyButtonStartX + $_applyBtnW + 2
+		$cancelButtonEndX   = $cancelButtonStartX + $_cancelBtnW - 1
 
 		$script:DialogButtonBounds = @{
 			buttonRowY   = $applyButtonRowY
@@ -164,29 +123,24 @@
 			$pswindow = (Get-Host).UI.RawUI
 			$newWindowSize = $pswindow.WindowSize
 			if ($newWindowSize.Width -ne $currentHostWidth -or $newWindowSize.Height -ne $currentHostHeight) {
-				$stableSize = Invoke-ResizeHandler -PreviousScreenState "dialog-theme"
-				$HostWidthRef.Value  = $stableSize.Width
-				$HostHeightRef.Value = $stableSize.Height
-				$currentHostWidth    = $stableSize.Width
-				$currentHostHeight   = $stableSize.Height
-				Write-MainFrame -Force -NoFlush
+				$stableSize = Invoke-DialogResize -HostWidthRef $HostWidthRef -HostHeightRef $HostHeightRef `
+					-ScreenState "dialog-theme"
+				$currentHostWidth  = $stableSize.Width
+				$currentHostHeight = $stableSize.Height
 				$needsRedraw = $true
-
 				$dialogX = [math]::Max(0, [math]::Floor(($currentHostWidth  - $dialogWidth)  / 2))
 				$dialogY = [math]::Max(0, [math]::Floor(($currentHostHeight - $dialogHeight) / 2))
-
 				& $drawThemeDialog $dialogX $dialogY
 				Write-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight -shadowColor $script:ThemeDialogShadow
 				Flush-Buffer -ClearFirst
-
-				$nextButtonRowY     = $dialogY + 6
-				$nextButtonStartX   = $dialogX + 2
-				$nextButtonEndX     = $nextButtonStartX + $dialogBracketWidth + $dialogIconWidth + $buttonLabelLength + $dialogParenOffset - 1
-				$applyButtonRowY    = $dialogY + 8
-				$applyButtonStartX  = $dialogX + 2
-				$applyButtonEndX    = $applyButtonStartX + $applyBtnChars - 1
-				$cancelButtonStartX = $applyButtonStartX + $applyBtnChars + 2
-				$cancelButtonEndX   = $cancelButtonStartX + $cancelBtnChars - 1
+			$nextButtonRowY     = $dialogY + 6
+			$nextButtonStartX   = $dialogX + 2
+			$nextButtonEndX     = $nextButtonStartX + $_nextBtnW - 1
+			$applyButtonRowY    = $dialogY + 8
+			$applyButtonStartX  = $dialogX + 2
+			$applyButtonEndX    = $applyButtonStartX + $_applyBtnW - 1
+			$cancelButtonStartX = $applyButtonStartX + $_applyBtnW + 2
+			$cancelButtonEndX   = $cancelButtonStartX + $_cancelBtnW - 1
 				$script:DialogButtonBounds = @{
 					buttonRowY   = $applyButtonRowY
 					updateStartX = $applyButtonStartX

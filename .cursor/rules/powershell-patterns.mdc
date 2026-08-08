@@ -80,3 +80,73 @@ Filter KeyDown/KeyUp in code after the read.
 ## GetDate in Hot Path
 
 `$date = Get-Date` is refreshed each 50ms tick. Use `$date.ToString("HH:mm:ss")` — don't call `(Get-Date)` again.
+
+## Input Registration (CRITICAL — use the helper, never inline)
+
+All user-input flag writes go through `Register-UserInput` (`Private/Helpers/Register-UserInput.ps1`). This is the **only** permitted writer of `$keyboardInputDetected`, `$mouseInputDetected`, `$script:userInputDetected`, `$script:LastUserActivityTime`, and the AutoResume timestamp.
+
+```powershell
+# CORRECT — one call sets all flags and timestamps
+Register-UserInput -Source Mouse -Date $date
+
+# WRONG — stale pattern, creates inconsistency
+$mouseInputDetected = $true
+$script:userInputDetected = $true
+if ($script:AutoResumeDelaySeconds -gt 0) { $LastUserInputTime = Get-Date }
+```
+
+Sources: `Mouse`, `Keyboard`, `Scroll`, `Click`.
+
+## `[string]` Type Annotation Coerces `$null` to `""` — Breaks Color/Object Params (CRITICAL)
+
+Declaring `[string]$Param = $null` causes PowerShell to silently coerce any `$null` passed by a caller to an empty string `""`. Downstream code that checks `$null -ne $Param` or attempts `[ConsoleColor]$Param` will then see `""` instead of `$null`, causing `InvalidCastException` that propagates uncaught through scriptblock invocations and crashes the script.
+
+```powershell
+# WRONG — $null passed by caller becomes ""
+param([string]$EmojiColor = $null)
+
+# Downstream: $null -ne "" is TRUE → [ConsoleColor]"" → crash
+$fgCode = if ($null -ne $FG) { $script:AnsiFG[[ConsoleColor]$FG] } else { 39 }
+
+# CORRECT — untyped; $null stays $null
+param($EmojiColor = $null)
+```
+
+Use untyped parameters for any optional nullable color, emoji, or object arg. `Write-Buffer` is defensively hardened (`$FG -ne ''` check), but the annotation is the root cause to fix.
+
+## Optional `[ref]` Parameters — Never Annotate With `[ref]` Type (CRITICAL)
+
+Declaring `[ref]$Param = $null` in a `param()` block throws `ParameterBindingArgumentTransformationException` every time the caller omits that argument. PowerShell fails to coerce the default `$null` to the `[ref]` type.
+
+```powershell
+# WRONG — crashes when caller omits $MouseDetectedRef
+param([ref]$MouseDetectedRef = $null)
+
+# CORRECT — no type annotation on optional ref parameters
+param($MouseDetectedRef = $null)
+```
+
+Mandatory `[ref]` params (no default) are fine: `[ref]$ManualPauseRef`. Optional ones must drop the annotation. The `$null -ne $Param` guard inside the body is unchanged; callers still pass `([ref]$var)` PSReferences normally.
+
+## LII Classifier (use the helper, never inline)
+
+`Test-UserInputActivity` (`Private/Helpers/Test-UserInputActivity.ps1`) wraps `GetLastInputInfo` + automation filters. Returns `@{ ActivityDetected; MouseMoved }`. Use it in the worker tick, wait-loop, and post-wait path instead of inlining the math.
+
+```powershell
+$_liiResult = Test-UserInputActivity -Date $date -CurrentPos $currentCheckPos `
+    -LastSimulatedTime $LastSimulatedKeyPress -LastAutomatedTime $workerLastAutomatedMouseMovement
+if ($_liiResult.ActivityDetected) { Register-UserInput -Source Mouse -Date $date }
+```
+
+## Ring-Buffer Log Append (use the helper, never inline)
+
+`Add-LogEntry` (`Private/Helpers/Add-LogEntry.ps1`) evicts the oldest entry when full and appends a new one. Never call `RemoveAt(0)` + `Add()` inline.
+
+```powershell
+# CORRECT
+Add-LogEntry -LogArray $LogArray -Rows $Rows -Text "Movement paused" -ShortText "Paused" -Date $date
+
+# WRONG — three-strikes boilerplate; use the helper
+if ($LogArray.Count -ge $Rows) { $LogArray.RemoveAt(0) }
+$null = $LogArray.Add([PSCustomObject]@{ ... })
+```

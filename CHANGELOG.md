@@ -6,7 +6,44 @@ All notable changes to `start-mjig.ps1` are documented in this file.
 
 ## [Latest] - Unreleased
 
-Changes since last commit (7dfe910 - "Stats display, theme system, Apply/Cancel dialogs, Green hotkeys"):
+Changes since last commit (ac7a56f - "Display sleep via DDC Standby, mouse wake, module extraction, full default view"):
+
+### Added
+
+- **`Register-UserInput`** (`Private/Helpers/Register-UserInput.ps1`) — single write point for all input flags (`$mouseInputDetected`, `$keyboardInputDetected`, `$script:userInputDetected`), the unified activity clock (`$script:LastUserActivityTime`), and the AutoResume timestamp. Eliminates 8+ scattered inline copies of these assignments.
+- **`Test-UserInputActivity`** (`Private/Helpers/Test-UserInputActivity.ps1`) — LII + `recentSimulated`/`recentAutoMove` filter classifier; returns `@{ ActivityDetected; MouseMoved }`. Replaces three inline copies of the same math (worker, wait-loop, post-wait).
+- **`Add-LogEntry`** (`Private/Helpers/Add-LogEntry.ps1`) — ring-buffer log append helper (evict oldest + append). Replaces 10+ inline `RemoveAt(0)` + `Add()` boilerplate blocks.
+- **`Send-ViewerMessage`** (`Private/IPC/Send-ViewerMessage.ps1`) — guard + try/catch wrapper for all viewer → worker pipe sends. Replaces 21 identical inline patterns.
+- **`Invoke-GlobalHotkeyAction`** (`Private/Helpers/Invoke-GlobalHotkeyAction.ps1`) — shared pause/sleep/quit handler for worker and inline main-loop paths. Eliminates the near-identical parallel copy in each mode.
+- **`Invoke-DialogResize`** (`Private/Helpers/Invoke-DialogResize.ps1`) — dialog resize skeleton wrapper (ResizeHandler → refs → Write-MainFrame → ParentRedrawCallback → redraw → Flush). All 8 dialogs converted.
+- **`Write-DialogButton`** (`Private/Rendering/Write-DialogButton.ps1`) — dialog button renderer (brackets/icon/separator/hotkey-parens/BG from `DialogButton*` theme variables); returns rendered width for click-bound calculation. All 8 dialogs converted.
+- **`Write-DialogFrame`** (`Private/Rendering/Write-DialogFrame.ps1`) — queues top border, title row, standard divider (Y+2), and bottom border. All 8 dialogs converted; `-NoDivider` switch for custom title rows.
+- **`$script:_FrameLayout` geometry cache** — `Write-MainFrame` now caches log/stats geometry and full menu geometry in a hashtable keyed by `"$HostWidth|$HostHeight|$Output|$CurrentThemeName|$TitlePresetIndex|$DisplaySleepMode|$DebugMode"`. Recomputes only when the stamp changes; on cache hit the 500ms render tick skips all layout math.
+- **`$script:LastUserActivityTime`** — unified "last real user activity" clock replacing four parallel clocks (`$LastUserInputTime`, `$script:_DisplaySleepLastInputTime`, `$_dsLastInputTime`, `$workerLastUserInputTime`). Auto-sleep idle time and cooldown remaining are both derived from this single clock.
+- **Signal Reuse rule** — new `signal-reuse.mdc` cursor rule and AGENTS.md section codifying the canonical anti-pattern (display-wake / `$mouseInputDetected` story) as a hard requirement for all future feature additions.
+
+### Fixed
+
+- **Viewer crash when opening Settings or Display Sleep dialog** — `Write-DialogButton` declared `[string]$Emoji = $null` and `[string]$EmojiColor = $null`. PowerShell's parameter binder coerces any `$null` passed by a caller to `""` (empty string). `Write-Buffer` then evaluated `$null -ne ""` as `$true` and attempted `[ConsoleColor]""`, throwing an `InvalidCastException` that propagated uncaught through the nested scriptblock render chain and terminated the viewer script. Fix: removed the `[string]` type annotation from both optional nullable parameters. `Write-Buffer` is also hardened with `$FG -ne ''` / `$BG -ne ''` guards as defense-in-depth. Root cause is the same class of PowerShell type-coercion gotcha as the prior `[ref]$Param = $null` worker crash.
+
+### Changed
+
+- **Display sleep wake** — removed the parallel `DisplaySleepPrePos` / `$_wakeMouseMoved` / Verify-only branch. Wake now uses three triggers (Keyboard KEY-UP, LMB click, `$mouseInputDetected`) that are the same signals already used to skip the movement interval.
+- **`Show-MovementModifyDialog`** — now calls the existing `Get-DialogButtonLayout` helper instead of inlining the icon/bracket/paren width math three times.
+
+### Removed
+
+- `$script:DisplaySleepPrePos` — removed; wake detection no longer uses a separate drift classifier
+- `$script:_DisplaySleepLastInputTime` — merged into `$script:LastUserActivityTime`
+- `Invoke-DisplaySleep -Action Verify` action — removed; no caller remains after the wake-detection simplification
+
+### Fixed
+
+- **Worker crash on any user input** — `Register-UserInput` declared optional `[ref]` parameters as `[ref]$Param = $null`. PowerShell's parameter binder throws `ParameterBindingArgumentTransformationException` when coercing the default `$null` to `[ref]` type. Removed the `[ref]` type annotation from the three optional ref parameters; PowerShell accepts the untyped `$null` default and the passed `([ref]$var)` PSReference objects without any coercion. This was the root cause of the worker crashing on the first detected mouse or keyboard event.
+
+---
+
+## [ac7a56f] - 2026-08-08
 
 ### Changed
 - **Display sleep uses VCP Standby (`0xD6=2`)** — was Off/DPM (`4`). Value `4` often drops the DDC I2C channel so software wake fails and a monitor power-cycle is required. Standby blanks the panel while keeping wake (`0xD6=1`) reachable.

@@ -54,18 +54,13 @@ $dialogHeight = 12
 		$themeButtonStartX   = $dialogX + 2
 		$themeButtonEndX     = $dialogX + 2 + $dialogBracketWidth + $dialogIconWidth + 7  + $dialogParenOffset - 1
 
-		# Build static line strings (used by animation + full render)
+		# Build static line strings (used by animation)
 		$hLine      = [string]$script:BoxHorizontal
-		$inner      = $dialogWidth - 2  # 33
+		$inner      = $dialogWidth - 2
 		$line0      = $script:BoxTopLeft    + ($hLine * $inner) + $script:BoxTopRight
-		$line2      = $script:BoxVerticalRight + ($hLine * $inner) + $script:BoxVerticalLeft
-		$lineBlank  = $script:BoxVertical   + (" "   * $inner) + $script:BoxVertical
 		$lineBottom = $script:BoxBottomLeft + ($hLine * $inner) + $script:BoxBottomRight
-		# indices 0-12; rows 4, 6, 8, 10 are $null — drawn as inline toggle rows
-		$dialogLines = @($line0, $null, $line2, $lineBlank, $null, $lineBlank, $null, $lineBlank, $null, $lineBlank, $null, $lineBlank, $lineBottom)
 		$_stgDialogWidth  = $dialogWidth
 		$_stgDialogHeight = $dialogHeight
-		$_stgDialogLines  = $dialogLines
 
 	# — Slide-up-from-behind animation (skipped on reopen after sub-dialog) --
 	if (-not $SkipAnimation) {
@@ -108,60 +103,36 @@ $dialogHeight = 12
 		}
 
 		$drawSettingsBtnRow = {
-			param($dx, $absRowY, $emoji, $hotkeyChar, $labelSuffix, $rowPad, $btnBg, $btnText, $btnHotkey, $bgColor, $borderColor, $labelPrefix = "")
-			$buttonX = $dx + 2
+			param($dx, $absRowY, $emoji, $hotkeyChar, $labelSuffix, $rowPad, $btnBg, $btnText, $btnHotkey, $bgColor, $borderColor)
 			Write-Buffer -X $dx -Y $absRowY -Text "$($script:BoxVertical) " -FG $borderColor -BG $bgColor
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -X $buttonX -Y $absRowY -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
-			$buttonContentX = $buttonX + [int]$script:DialogButtonShowBrackets
-			if ($script:DialogButtonShowIcon) {
-				Write-Buffer -X $buttonContentX -Y $absRowY -Text $emoji -BG $btnBg -Wide
-				Write-Buffer -X ($buttonContentX + 2) -Y $absRowY -Text $script:DialogButtonSeparator -FG $btnText -BG $btnBg
-			} else {
-				Write-Buffer -X $buttonContentX -Y $absRowY -Text "" -BG $btnBg
-			}
-			if ($labelPrefix.Length -gt 0) { Write-Buffer -Text $labelPrefix -FG $btnText -BG $btnBg }
-			$closingParen = if ($script:DialogButtonShowHotkeyParens) { ")" } else { "" }
-			if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $btnText -BG $btnBg }
-			Write-Buffer -Text $hotkeyChar -FG $btnHotkey -BG $btnBg
-			Write-Buffer -Text "$closingParen${labelSuffix}" -FG $btnText -BG $btnBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+			$null = Write-DialogButton -X ($dx + 2) -Y $absRowY -Hotkey $hotkeyChar -Suffix $labelSuffix `
+				-Emoji $emoji -EmojiColor $null -TextColor $btnText -BgColor $btnBg -HotkeyColor $btnHotkey
 			Write-Buffer -Text (" " * $rowPad) -BG $bgColor
 			Write-Buffer -Text $script:BoxVertical -FG $borderColor -BG $bgColor
 		}
 
 		# — Render helper: full dialog — $focused selects onfocus vs offfocus -----
 		$drawSettingsDialog = {
-			param($dx, $dy, [bool]$focused = $true, $dlgLines = $null)
-			if ($null -eq $dlgLines) { $dlgLines = $dialogLines }
-			$localBg        = if ($focused) { $script:SettingsDialogBg }                  else { $script:SettingsDialogOffFocusBg }
-			$localBorder    = if ($focused) { $script:SettingsDialogBorder }               else { $script:SettingsDialogOffFocusBorder }
-			$localTitle     = if ($focused) { $script:SettingsDialogTitle }                else { $script:SettingsDialogOffFocusTitle }
-			$localText      = if ($focused) { $script:SettingsDialogText }                 else { $script:SettingsDialogOffFocusText }
-			$localBtnBg     = if ($focused) { $script:SettingsDialogButtonBg }             else { $script:SettingsDialogOffFocusButtonBg }
-			$localBtnText   = if ($focused) { $script:SettingsDialogButtonText }           else { $script:SettingsDialogOffFocusButtonText }
-			$localBtnHotkey = if ($focused) { $script:SettingsDialogButtonHotkey }         else { $script:SettingsDialogOffFocusButtonHotkey }
-			for ($i = 0; $i -le $dialogHeight; $i++) {
+			param($dx, $dy, [bool]$focused = $true)
+			$localBg        = if ($focused) { $script:SettingsDialogBg }          else { $script:SettingsDialogOffFocusBg }
+			$localBorder    = if ($focused) { $script:SettingsDialogBorder }       else { $script:SettingsDialogOffFocusBorder }
+			$localTitle     = if ($focused) { $script:SettingsDialogTitle }        else { $script:SettingsDialogOffFocusTitle }
+			$localBtnBg     = if ($focused) { $script:SettingsDialogButtonBg }     else { $script:SettingsDialogOffFocusButtonBg }
+			$localBtnText   = if ($focused) { $script:SettingsDialogButtonText }   else { $script:SettingsDialogOffFocusButtonText }
+			$localBtnHotkey = if ($focused) { $script:SettingsDialogButtonHotkey } else { $script:SettingsDialogOffFocusButtonHotkey }
+			$_bv            = [string]$script:BoxVertical
+			for ($i = 0; $i -le $_stgDialogHeight; $i++) {
+				Write-Buffer -X $dx -Y ($dy + $i) -Text (" " * $dialogWidth) -BG $localBg
+			}
+			Write-DialogFrame -X $dx -Y $dy -Width $dialogWidth -Height $_stgDialogHeight `
+				-Title "Settings" -BorderFG $localBorder -TitleFG $localTitle -BG $localBg
+			for ($i = 3; $i -lt $_stgDialogHeight; $i++) {
 				$rowY = $dy + $i
-				Write-Buffer -X $dx -Y $rowY -Text (" " * $dialogWidth) -BG $localBg
-				if ($i -eq 1) {
-					Write-Buffer -X $dx -Y $rowY -Text "$($script:BoxVertical)  " -FG $localBorder -BG $localBg
-					Write-Buffer -Text "Settings" -FG $localTitle -BG $localBg
-					$titlePadding = Get-Padding -UsedWidth (3 + "Settings".Length + 1) -TotalWidth $dialogWidth
-					Write-Buffer -Text (" " * $titlePadding) -BG $localBg
-					Write-Buffer -Text $script:BoxVertical -FG $localBorder -BG $localBg
-				} elseif ($i -eq 4) {
-				& $drawSettingsBtnRow $dx $rowY $emojiHourglass "e" "nd Time" $timePad $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder
-			} elseif ($i -eq 6) {
-				& $drawSettingsBtnRow $dx $rowY $emojiMouse "m" "ouse Movement" $movePad $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder
-			} elseif ($i -eq 8) {
-				& $drawSettingsBtnRow $dx $rowY $emojiOptions "o" "ptions" $optionsPad $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder
-			} elseif ($i -eq 10) {
-			& $drawSettingsBtnRow $dx $rowY $emojiTheme "t" "heme" ([math]::Max(0, $themePad)) $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder
-				} elseif ($i -eq $dialogHeight) {
-					Write-Buffer -X $dx -Y $rowY -Text $lineBottom -FG $localBorder -BG $localBg
-				} elseif ($null -ne $dlgLines[$i]) {
-					Write-Buffer -X $dx -Y $rowY -Text $dlgLines[$i] -FG $localText -BG $localBg
-				}
+				if     ($i -eq 4)  { & $drawSettingsBtnRow $dx $rowY $emojiHourglass "e" "nd Time"       $timePad    $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder }
+				elseif ($i -eq 6)  { & $drawSettingsBtnRow $dx $rowY $emojiMouse     "m" "ouse Movement" $movePad    $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder }
+				elseif ($i -eq 8)  { & $drawSettingsBtnRow $dx $rowY $emojiOptions   "o" "ptions"        $optionsPad $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder }
+				elseif ($i -eq 10) { & $drawSettingsBtnRow $dx $rowY $emojiTheme     "t" "heme"          ([math]::Max(0, $themePad)) $localBtnBg $localBtnText $localBtnHotkey $localBg $localBorder }
+				else               { Write-Buffer -X $dx -Y $rowY -Text ($_bv + (" " * ($dialogWidth - 2)) + $_bv) -FG $localBorder -BG $localBg }
 			}
 		}
 
@@ -198,18 +169,16 @@ $dialogHeight = 12
 			$pshost        = Get-Host
 			$pswindow      = $pshost.UI.RawUI
 			$newWindowSize = $pswindow.WindowSize
-			if ($newWindowSize.Width -ne $currentHostWidth -or $newWindowSize.Height -ne $currentHostHeight) {
-				$stableSize = Invoke-ResizeHandler -PreviousScreenState "dialog-settings"
-				$HostWidthRef.Value  = $stableSize.Width
-				$HostHeightRef.Value = $stableSize.Height
-				$currentHostWidth    = $stableSize.Width
-				$currentHostHeight   = $stableSize.Height
-				Write-MainFrame -Force -NoFlush
+		if ($newWindowSize.Width -ne $currentHostWidth -or $newWindowSize.Height -ne $currentHostHeight) {
+			$stableSize = Invoke-DialogResize -HostWidthRef $HostWidthRef -HostHeightRef $HostHeightRef `
+				-ScreenState "dialog-settings"
+			$currentHostWidth    = $stableSize.Width
+			$currentHostHeight   = $stableSize.Height
 
-				$_bpH    = [math]::Max(1, $script:BorderPadH)
-				$dialogX = [math]::Max(0, [math]::Min($_bpH - 1, $currentHostWidth - $dialogWidth))
-				$menuBarY     = if ($null -ne $script:MenuBarY) { $script:MenuBarY } else { $currentHostHeight - 2 }
-				$dialogY      = [math]::Max(0, $menuBarY - 2 - $dialogHeight)
+			$_bpH    = [math]::Max(1, $script:BorderPadH)
+			$dialogX = [math]::Max(0, [math]::Min($_bpH - 1, $currentHostWidth - $dialogWidth))
+			$menuBarY     = if ($null -ne $script:MenuBarY) { $script:MenuBarY } else { $currentHostHeight - 2 }
+			$dialogY      = [math]::Max(0, $menuBarY - 2 - $dialogHeight)
 				$timePad    = $dialogWidth - (2 + $dialogBracketWidth + $dialogIconWidth + 10 + $dialogParenOffset + 1)
 				$movePad    = $dialogWidth - (2 + $dialogBracketWidth + $dialogIconWidth + 16 + $dialogParenOffset + 1)
 				$optionsPad = $dialogWidth - (2 + $dialogBracketWidth + $dialogIconWidth + 9  + $dialogParenOffset + 1)
@@ -293,16 +262,14 @@ $dialogHeight = 12
 			$subHostWidthRef  = $HostWidthRef
 			$subHostHeightRef = $HostHeightRef
 			$settingsParentRedraw = {
-					param($w, $h)
-					$dialogWidth  = $_stgDialogWidth
-					$dialogHeight = $_stgDialogHeight
-					$_bpH     = [math]::Max(1, $script:BorderPadH)
-					$parentDX = [math]::Max(0, [math]::Min($_bpH - 1, $w - $dialogWidth))
-					$mBarY    = if ($null -ne $script:MenuBarY) { $script:MenuBarY } else { $h - 2 }
-					$parentDY = [math]::Max(0, $mBarY - 2 - $dialogHeight)
-					& $drawSettingsDialog $parentDX $parentDY $false $_stgDialogLines
-				}
-				$timeResult = Show-TimeChangeDialog -currentEndTime $EndTimeIntRef.Value -hostWidthRef $subHostWidthRef -hostHeightRef $subHostHeightRef -ParentRedrawCallback $settingsParentRedraw
+				param($w, $h)
+				$_bpH     = [math]::Max(1, $script:BorderPadH)
+				$parentDX = [math]::Max(0, [math]::Min($_bpH - 1, $w - $_stgDialogWidth))
+				$mBarY    = if ($null -ne $script:MenuBarY) { $script:MenuBarY } else { $h - 2 }
+				$parentDY = [math]::Max(0, $mBarY - 2 - $_stgDialogHeight)
+				& $drawSettingsDialog $parentDX $parentDY $false
+			}
+			$timeResult = Show-TimeChangeDialog -currentEndTime $EndTimeIntRef.Value -hostWidthRef $subHostWidthRef -hostHeightRef $subHostHeightRef -ParentRedrawCallback $settingsParentRedraw
 				$currentHostWidth  = $subHostWidthRef.Value
 				$currentHostHeight = $subHostHeightRef.Value
 				$HostWidthRef.Value  = $currentHostWidth
@@ -359,13 +326,11 @@ $dialogHeight = 12
 			$subHostHeightRef = $HostHeightRef
 			$settingsParentRedraw = {
 				param($w, $h)
-				$dialogWidth  = $_stgDialogWidth
-				$dialogHeight = $_stgDialogHeight
 				$_bpH     = [math]::Max(1, $script:BorderPadH)
-				$parentDX = [math]::Max(0, [math]::Min($_bpH - 1, $w - $dialogWidth))
+				$parentDX = [math]::Max(0, [math]::Min($_bpH - 1, $w - $_stgDialogWidth))
 				$mBarY    = if ($null -ne $script:MenuBarY) { $script:MenuBarY } else { $h - 2 }
-				$parentDY = [math]::Max(0, $mBarY - 2 - $dialogHeight)
-				& $drawSettingsDialog $parentDX $parentDY $false $_stgDialogLines
+				$parentDY = [math]::Max(0, $mBarY - 2 - $_stgDialogHeight)
+				& $drawSettingsDialog $parentDX $parentDY $false
 			}
 				$moveResult = Show-MovementModifyDialog `
 					-currentIntervalSeconds $script:IntervalSeconds -currentIntervalVariance $script:IntervalVariance `
@@ -429,13 +394,11 @@ $dialogHeight = 12
 		$subHostHeightRef = $HostHeightRef
 		$settingsParentRedraw = {
 			param($w, $h)
-			$dialogWidth  = $_stgDialogWidth
-			$dialogHeight = $_stgDialogHeight
 			$_bpH     = [math]::Max(1, $script:BorderPadH)
-			$parentDX = [math]::Max(0, [math]::Min($_bpH - 1, $w - $dialogWidth))
+			$parentDX = [math]::Max(0, [math]::Min($_bpH - 1, $w - $_stgDialogWidth))
 			$mBarY    = if ($null -ne $script:MenuBarY) { $script:MenuBarY } else { $h - 2 }
-			$parentDY = [math]::Max(0, $mBarY - 2 - $dialogHeight)
-			& $drawSettingsDialog $parentDX $parentDY $false $_stgDialogLines
+			$parentDY = [math]::Max(0, $mBarY - 2 - $_stgDialogHeight)
+			& $drawSettingsDialog $parentDX $parentDY $false
 		}
 		$optionsResult = Show-OptionsDialog -HostWidthRef $subHostWidthRef -HostHeightRef $subHostHeightRef -ParentRedrawCallback $settingsParentRedraw -LogArrayRef $LogArrayRef
 		$currentHostWidth  = $subHostWidthRef.Value

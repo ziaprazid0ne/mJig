@@ -21,13 +21,7 @@
 		$script:CursorVisible = $true
 		[Console]::Write("$($script:ESC)[?25h")
 
-		# Box strings — [string] casts prevent [char]*int integer arithmetic
-		$_bh    = [string]$script:BoxHorizontal
 		$_inner = $dialogWidth - 2
-		$line0  = [string]$script:BoxTopLeft    + ($_bh * $_inner) + [string]$script:BoxTopRight
-		$line2  = [string]$script:BoxVerticalRight + ($_bh * $_inner) + [string]$script:BoxVerticalLeft
-		$lineBl = [string]$script:BoxVertical   + (" " * $_inner) + [string]$script:BoxVertical
-		$lineB  = [string]$script:BoxBottomLeft + ($_bh * $_inner) + [string]$script:BoxBottomRight
 
 		$emojiSpeaker = [char]::ConvertFromUtf32(0x1F50A)  # 🔊
 		$emojiClock   = [char]::ConvertFromUtf32(0x23F0)   # ⏰
@@ -64,23 +58,12 @@
 
 		$drawToggleRow = {
 			param($DX, $RowY, $emoji, $hotkeyChar, $labelSuffix)
-			$localBg  = $script:SettingsDialogBg
-			$rowPad   = [math]::Max(0, $dialogWidth - (2 + $dialogBracketWidth + $dialogIconWidth + 3 + $labelSuffix.Length + $dialogParenOffset + 1))
-			$cp       = if ($script:DialogButtonShowHotkeyParens) { ")" } else { "" }
-			$btnX     = $DX + 2
+			$localBg = $script:SettingsDialogBg
+			$_btnW   = $dialogBracketWidth + $dialogIconWidth + (if ($script:DialogButtonShowHotkeyParens) { 2 } else { 0 }) + 1 + $labelSuffix.Length
+			$rowPad  = [math]::Max(0, $dialogWidth - 3 - $_btnW)
 			Write-Buffer -X $DX -Y $RowY -Text "$([string]$script:BoxVertical) " -FG $script:SettingsDialogBorder -BG $localBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -X $btnX -Y $RowY -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
-			$cx = $btnX + [int]$script:DialogButtonShowBrackets
-			if ($script:DialogButtonShowIcon) {
-				Write-Buffer -X $cx -Y $RowY -Text $emoji -BG $script:SettingsDialogButtonBg -Wide
-				Write-Buffer -X ($cx + 2) -Y $RowY -Text $script:DialogButtonSeparator -FG $script:SettingsDialogButtonText -BG $script:SettingsDialogButtonBg
-			} else {
-				Write-Buffer -X $cx -Y $RowY -Text "" -BG $script:SettingsDialogButtonBg
-			}
-			if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:SettingsDialogButtonText -BG $script:SettingsDialogButtonBg }
-			Write-Buffer -Text $hotkeyChar -FG $script:SettingsDialogButtonHotkey -BG $script:SettingsDialogButtonBg
-			Write-Buffer -Text "$cp$labelSuffix" -FG $script:SettingsDialogButtonText -BG $script:SettingsDialogButtonBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+			$null = Write-DialogButton -X ($DX + 2) -Y $RowY -Hotkey $hotkeyChar -Suffix $labelSuffix `
+				-Emoji $emoji -EmojiColor $null -TextColor $script:SettingsDialogButtonText -BgColor $script:SettingsDialogButtonBg -HotkeyColor $script:SettingsDialogButtonHotkey
 			Write-Buffer -Text (" " * $rowPad) -BG $localBg
 			Write-Buffer -Text "$([string]$script:BoxVertical)" -FG $script:SettingsDialogBorder -BG $localBg
 		}
@@ -111,46 +94,18 @@
 			$localBtnBg = $script:SettingsDialogButtonBg
 			$localBtnFg = $script:SettingsDialogButtonText
 			$localBtnHk = $script:SettingsDialogButtonHotkey
-			$cp         = if ($script:DialogButtonShowHotkeyParens) { ")" } else { "" }
+			$slpX       = $DX + 2
+			$aplX       = $slpX + $sleepBtnW + 2
+			$cncX       = $aplX + $applyBtnW + 2
 			Write-Buffer -X $DX -Y $RowY -Text "$([string]$script:BoxVertical) " -FG $script:SettingsDialogBorder -BG $localBg
-			# Sleep button
-			$slpX = $DX + 2
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -X $slpX -Y $RowY -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
-			$scx = $slpX + [int]$script:DialogButtonShowBrackets
-			if ($script:DialogButtonShowIcon) {
-				Write-Buffer -X $scx -Y $RowY -Text $emojiZzz -BG $localBtnBg -Wide
-				Write-Buffer -X ($scx + 2) -Y $RowY -Text $script:DialogButtonSeparator -FG $localBtnFg -BG $localBtnBg
-			} else { Write-Buffer -X $scx -Y $RowY -Text "" -BG $localBtnBg }
-			if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $localBtnFg -BG $localBtnBg }
-			Write-Buffer -Text "s" -FG $localBtnHk -BG $localBtnBg
-			Write-Buffer -Text "${cp}leep" -FG $localBtnFg -BG $localBtnBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+			$null = Write-DialogButton -X $slpX -Y $RowY -Hotkey "s" -Suffix "leep" `
+				-Emoji $emojiZzz -EmojiColor $null -TextColor $localBtnFg -BgColor $localBtnBg -HotkeyColor $localBtnHk
 			Write-Buffer -Text "  " -BG $localBg
-			# Apply button
-			$aplX = $slpX + $sleepBtnW + 2
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -X $aplX -Y $RowY -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
-			$acx = $aplX + [int]$script:DialogButtonShowBrackets
-			if ($script:DialogButtonShowIcon) {
-				Write-Buffer -X $acx -Y $RowY -Text $emojiApply -BG $localBtnBg -Wide
-				Write-Buffer -X ($acx + 2) -Y $RowY -Text $script:DialogButtonSeparator -FG $localBtnFg -BG $localBtnBg
-			} else { Write-Buffer -X $acx -Y $RowY -Text "" -BG $localBtnBg }
-			if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $localBtnFg -BG $localBtnBg }
-			Write-Buffer -Text "a" -FG $localBtnHk -BG $localBtnBg
-			Write-Buffer -Text "${cp}pply" -FG $localBtnFg -BG $localBtnBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+			$null = Write-DialogButton -X $aplX -Y $RowY -Hotkey "a" -Suffix "pply" `
+				-Emoji $emojiApply -EmojiColor $null -TextColor $localBtnFg -BgColor $localBtnBg -HotkeyColor $localBtnHk
 			Write-Buffer -Text "  " -BG $localBg
-			# Cancel button
-			$cncX = $aplX + $applyBtnW + 2
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -X $cncX -Y $RowY -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
-			$ccx = $cncX + [int]$script:DialogButtonShowBrackets
-			if ($script:DialogButtonShowIcon) {
-				Write-Buffer -X $ccx -Y $RowY -Text $emojiClose -FG $script:TextError -BG $localBtnBg -Wide
-				Write-Buffer -X ($ccx + 2) -Y $RowY -Text $script:DialogButtonSeparator -FG $localBtnFg -BG $localBtnBg
-			} else { Write-Buffer -X $ccx -Y $RowY -Text "" -BG $localBtnBg }
-			if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $localBtnFg -BG $localBtnBg }
-			Write-Buffer -Text "c" -FG $localBtnHk -BG $localBtnBg
-			Write-Buffer -Text "${cp}ancel" -FG $localBtnFg -BG $localBtnBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+			$null = Write-DialogButton -X $cncX -Y $RowY -Hotkey "c" -Suffix "ancel" `
+				-Emoji $emojiClose -EmojiColor $script:TextError -TextColor $localBtnFg -BgColor $localBtnBg -HotkeyColor $localBtnHk
 			Write-Buffer -Text (" " * $btnTrail) -BG $localBg
 			Write-Buffer -Text "$([string]$script:BoxVertical)" -FG $script:SettingsDialogBorder -BG $localBg
 		}
@@ -160,21 +115,17 @@
 			$localBg  = $script:SettingsDialogBg
 			$localBd  = $script:SettingsDialogBorder
 			$localTx  = $script:SettingsDialogText
+			$_bv      = [string]$script:BoxVertical
 
 			for ($i = 0; $i -le $dialogHeight; $i++) {
+				Write-Buffer -X $DX -Y ($DY + $i) -Text (" " * $dialogWidth) -BG $localBg
+			}
+			Write-DialogFrame -X $DX -Y $DY -Width $dialogWidth -Height $dialogHeight `
+				-Title "Sleep Display" -BorderFG $localBd -TitleFG $script:SettingsDialogTitle -BG $localBg
+
+			for ($i = 3; $i -lt $dialogHeight; $i++) {
 				$ry = $DY + $i
-				Write-Buffer -X $DX -Y $ry -Text (" " * $dialogWidth) -BG $localBg
-				if ($i -eq 0) {
-					Write-Buffer -X $DX -Y $ry -Text $line0 -FG $localBd -BG $localBg
-				} elseif ($i -eq 1) {
-					$tpad = Get-Padding -UsedWidth (4 + "Sleep Display".Length + 1) -TotalWidth $dialogWidth
-					Write-Buffer -X $DX -Y $ry -Text "$([string]$script:BoxVertical)  " -FG $localBd -BG $localBg
-					Write-Buffer -Text "Sleep Display" -FG $script:SettingsDialogTitle -BG $localBg
-					Write-Buffer -Text (" " * $tpad) -BG $localBg
-					Write-Buffer -Text "$([string]$script:BoxVertical)" -FG $localBd -BG $localBg
-				} elseif ($i -eq 2) {
-					Write-Buffer -X $DX -Y $ry -Text $line2 -FG $localBd -BG $localBg
-				} elseif ($i -eq 4) {
+				if ($i -eq 4) {
 					$t = "  Sends a DDC/CI power command"
 					$p = Get-Padding -UsedWidth ($t.Length + 2) -TotalWidth $dialogWidth
 					Write-Buffer -X $DX -Y $ry -Text "$([string]$script:BoxVertical)$t$(' ' * $p)$([string]$script:BoxVertical)" -FG $localTx -BG $localBg
@@ -196,10 +147,8 @@
 					& $drawTimeoutRow $DX $ry
 				} elseif ($i -eq 14) {
 					& $drawButtonRow $DX $ry
-				} elseif ($i -eq $dialogHeight) {
-					Write-Buffer -X $DX -Y $ry -Text $lineB -FG $localBd -BG $localBg
-				} elseif ($i -eq 3 -or $i -eq 7 -or $i -eq 9 -or $i -eq 11 -or $i -eq 13 -or $i -eq 15) {
-					Write-Buffer -X $DX -Y $ry -Text $lineBl -FG $localTx -BG $localBg
+				} else {
+					Write-Buffer -X $DX -Y $ry -Text ($_bv + (" " * $_inner) + $_bv) -FG $localTx -BG $localBg
 				}
 			}
 		}
@@ -231,15 +180,13 @@
 			# Resize check
 			$newWindowSize = (Get-Host).UI.RawUI.WindowSize
 			if ($newWindowSize.Width -ne $currentHostWidth -or $newWindowSize.Height -ne $currentHostHeight) {
-				$stableSize          = Invoke-ResizeHandler -PreviousScreenState "dialog-display-sleep"
-				$HostWidthRef.Value  = $stableSize.Width
-				$HostHeightRef.Value = $stableSize.Height
-				$currentHostWidth    = $stableSize.Width
-				$currentHostHeight   = $stableSize.Height
+				$stableSize = Invoke-DialogResize -HostWidthRef $HostWidthRef -HostHeightRef $HostHeightRef `
+					-ScreenState "dialog-display-sleep"
+				$currentHostWidth  = $stableSize.Width
+				$currentHostHeight = $stableSize.Height
 				$dialogX = [math]::Max(0, [math]::Floor(($currentHostWidth  - $dialogWidth)  / 2))
 				$dialogY = [math]::Max(0, [math]::Floor(($currentHostHeight - $dialogHeight) / 2))
 				$needsRedraw = $true
-				Write-MainFrame -Force -NoFlush
 				& $drawDialog $dialogX $dialogY
 				Write-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight -shadowColor $script:SettingsDialogShadow
 				Flush-Buffer -ClearFirst

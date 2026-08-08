@@ -29,25 +29,25 @@ $_handleIpcMsg = {
 			if ([bool]$msg.keyboardInputDetected) { $keyboardInputDetected = $true }
 			if ([bool]$msg.keyboardInferred) { $_keyboardInferred = $true }
 			$SkipUpdate = [bool]$msg.userInputDetected -or $cooldownActive
-			# Real user activity from worker also re-arms the recurring auto-sleep idle clock
-			if ([bool]$msg.userInputDetected) {
-				$script:_DisplaySleepLastInputTime = Get-Date
+		# Real user activity from worker also re-arms the unified idle clock and cooldown
+		if ([bool]$msg.userInputDetected) {
+			$script:LastUserActivityTime = Get-Date
+			$script:_CooldownArmed = $true
+		}
+		# Keep viewer display-sleep UI in sync with worker-owned toggles (global hotkey)
+		if ($null -ne $msg.displaySleepMode) {
+			$_incomingSleep = [bool]$msg.displaySleepMode
+			if ($_incomingSleep -ne $script:DisplaySleepMode) {
+			$script:DisplaySleepMode = $_incomingSleep
+			if ($_incomingSleep) {
+				$script:DisplaySleepActivatedAt = Get-Date
+			} else {
+				$script:DisplaySleepActivatedAt = $null
+				$script:LastUserActivityTime = Get-Date
 			}
-			# Keep viewer display-sleep UI in sync with worker-owned toggles (global hotkey)
-			if ($null -ne $msg.displaySleepMode) {
-				$_incomingSleep = [bool]$msg.displaySleepMode
-				if ($_incomingSleep -ne $script:DisplaySleepMode) {
-					$script:DisplaySleepMode = $_incomingSleep
-					if ($_incomingSleep) {
-						$script:DisplaySleepActivatedAt = Get-Date
-						$script:DisplaySleepPrePos      = Get-MousePosition
-					} else {
-						$script:DisplaySleepActivatedAt = $null
-						$script:_DisplaySleepLastInputTime = Get-Date
-					}
-				}
-			}
-			if ($null -ne $msg.statsWorkerStartTime) { try { $ScriptStartTime = [DateTime]::Parse([string]$msg.statsWorkerStartTime) } catch {} }
+		}
+	}
+		if ($null -ne $msg.statsWorkerStartTime) { try { $ScriptStartTime = [DateTime]::Parse([string]$msg.statsWorkerStartTime) } catch {} }
 			if ($null -ne $msg.statsMoveCount)             { $script:StatsMoveCount             = [int]$msg.statsMoveCount }
 			if ($null -ne $msg.statsSkipCount)             { $script:StatsSkipCount             = [int]$msg.statsSkipCount }
 			if ($null -ne $msg.statsCurrentStreak)         { $script:StatsCurrentStreak         = [int]$msg.statsCurrentStreak }
@@ -129,10 +129,9 @@ $_handleIpcMsg = {
 				$script:DisplaySleepMode = $_incomingSleep
 				if ($_incomingSleep) {
 					$script:DisplaySleepActivatedAt = Get-Date
-					$script:DisplaySleepPrePos      = Get-MousePosition
 				} else {
 					$script:DisplaySleepActivatedAt = $null
-					$script:_DisplaySleepLastInputTime = Get-Date
+					$script:LastUserActivityTime = Get-Date
 				}
 			}
 		}

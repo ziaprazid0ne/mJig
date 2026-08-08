@@ -143,7 +143,7 @@ You can also click menu buttons with your mouse. Buttons respond visually on pre
 >
 > The `(d)isplay` menu button shows 💤 when display sleep is available and 🌑 when the display is currently sleeping. Clicking the menu button opens the Display Sleep dialog (description + audio/timed-sleep settings). The `d` keyboard shortcut and `Shift+M+D`/`Shift+M+S` global hotkeys skip the dialog for quick toggle. Timed sleep, when enabled, keeps re-sleeping the display after each idle timeout for the rest of the session.
 >
-> After a long sleep, wake retries DDC knocks with longer waits. Keyboard, click, and the same user-mouse detection used to skip movement intervals all issue an active wake. Raw cursor drift without that user-mouse flag only checks whether the panel is already on (e.g. you power-cycled the monitor), so automated cursor movement cannot turn the display back on.
+> After a long sleep, wake retries DDC knocks with longer waits. Keyboard, click, and the same user-mouse detection used to skip movement intervals all issue an active wake. Automated cursor movement does not set the user-mouse flag, so it cannot turn the display back on.
 
 **Modify Movement Settings** (`m` key or via Settings):
 - Interval timing and variance

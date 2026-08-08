@@ -26,35 +26,34 @@
 
 		$drawInfoDialog = {
 			param($dx, $dy)
-			$inner = $dialogWidth - 2   # 60
-			$hLine = [string]$script:BoxHorizontal
+			$inner      = $dialogWidth - 2   # 60
+			$hLine      = [string]$script:BoxHorizontal
+			$_bv        = [string]$script:BoxVertical
 			$mouseEmoji = [char]::ConvertFromUtf32(0x1F400)  # U+1F400 mouse
 			$checkChar  = [char]0x2713   # U+2713 checkmark
 			$arrowUp    = [char]0x2191   # U+2191 arrow up
 			$redX       = [char]::ConvertFromUtf32(0x274C)   # U+274C red X
 
 			# Clear dialog background
-			for ($i = 0; $i -lt $dialogHeight; $i++) {
+			for ($i = 0; $i -le $dialogHeight; $i++) {
 				Write-Buffer -X $dx -Y ($dy + $i) -Text (" " * $dialogWidth) -BG $script:InfoDialogBg
 			}
 
-			# — Line 0: top border --------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 0) -Text ($script:BoxTopLeft + ($hLine * $inner) + $script:BoxTopRight) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
+			# — Lines 0/2/$dialogHeight: top border + divider + bottom border (custom title at row 1) --
+			Write-DialogFrame -X $dx -Y $dy -Width $dialogWidth -Height $dialogHeight `
+				-Title "" -BorderFG $script:InfoDialogBorder -TitleFG $script:InfoDialogTitle -BG $script:InfoDialogBg
 
 		# — Line 1: title with logo emoji ---------------------------------
 		# Layout: |(1) + "  mJig("(7) + emoji(2) + ")"(1) + "  About & Version"(17) + pad(33) + |(1) = 62
-		Write-Buffer -X $dx -Y ($dy + 1) -Text "$($script:BoxVertical)  mJig(" -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
+		Write-Buffer -X $dx -Y ($dy + 1) -Text "$_bv  mJig(" -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 		Write-Buffer -Text $mouseEmoji -FG $script:InfoDialogTitle -BG $script:InfoDialogBg
 		Write-Buffer -X ($dx + 10) -Y ($dy + 1) -Text ")" -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 		Write-Buffer -Text "  About & Version" -FG $script:InfoDialogTitle -BG $script:InfoDialogBg
 		Write-Buffer -Text (" " * 33) -BG $script:InfoDialogBg
-		Write-Buffer -Text $script:BoxVertical -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
-
-			# — Line 2: divider -----------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 2) -Text ($script:BoxVerticalRight + ($hLine * $inner) + $script:BoxVerticalLeft) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
+		Write-Buffer -Text $_bv -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 
 			# — Line 3: blank -------------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 3) -Text ($script:BoxVertical + (" " * $inner) + $script:BoxVertical) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
+			Write-Buffer -X $dx -Y ($dy + 3) -Text ($_bv + (" " * $inner) + $_bv) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 
 			# — Line 4: Version -----------------------------------------------
 			$vLabel = "  Version:     "; $vVal = $script:Version
@@ -98,7 +97,7 @@
 			Write-Buffer -Text $script:BoxVertical -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 
 			# — Line 7: blank -------------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 7) -Text ($script:BoxVertical + (" " * $inner) + $script:BoxVertical) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
+			Write-Buffer -X $dx -Y ($dy + 7) -Text ($_bv + (" " * $inner) + $_bv) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 
 			# — Line 8: section divider ---------------------------------------
 			Write-Buffer -X $dx -Y ($dy + 8) -Text ($script:BoxVerticalRight + ($hLine * $inner) + $script:BoxVerticalLeft) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
@@ -114,7 +113,7 @@
 			Write-Buffer -X $dx -Y ($dy + 10) -Text ($script:BoxVerticalRight + ($hLine * $inner) + $script:BoxVerticalLeft) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 
 			# — Line 11: blank ------------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 11) -Text ($script:BoxVertical + (" " * $inner) + $script:BoxVertical) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
+			Write-Buffer -X $dx -Y ($dy + 11) -Text ($_bv + (" " * $inner) + $_bv) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 
 			# — Lines 12-17: configuration rows ------------------------------
 		$endTimeDsp    = if ($endTimeInt -eq -1 -or [string]::IsNullOrEmpty($endTimeStr)) { [char]0x2014 } else { "$($endTimeStr.Substring(0,2)):$($endTimeStr.Substring(2,2))" }
@@ -138,34 +137,17 @@
 			}
 
 			# — Line 18: blank ------------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 18) -Text ($script:BoxVertical + (" " * $inner) + $script:BoxVertical) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
+			Write-Buffer -X $dx -Y ($dy + 18) -Text ($_bv + (" " * $inner) + $_bv) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 
 			# — Line 19: close button row -------------------------------------
-			$btnX = $dx + 2
 			Write-Buffer -X $dx -Y ($dy + 19) -Text "$($script:BoxVertical) " -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
-			if ($script:DialogButtonShowBrackets) {
-				Write-Buffer -X $btnX -Y ($dy + 19) -Text "[" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg
-			}
-			$btnContentX = $btnX + [int]$script:DialogButtonShowBrackets
-			if ($script:DialogButtonShowIcon) {
-				Write-Buffer -X $btnContentX -Y ($dy + 19) -Text $redX -FG $script:InfoDialogButtonText -BG $script:InfoDialogButtonBg -Wide
-				Write-Buffer -X ($btnContentX + 2) -Y ($dy + 19) -Text $script:DialogButtonSeparator -FG $script:InfoDialogButtonText -BG $script:InfoDialogButtonBg
-			} else {
-				Write-Buffer -X $btnContentX -Y ($dy + 19) -Text "" -BG $script:InfoDialogButtonBg
-			}
-		$closingParen = if ($script:DialogButtonShowHotkeyParens) { ")" } else { "" }
-		if ($script:DialogButtonShowHotkeyParens) { Write-Buffer -Text "(" -FG $script:InfoDialogButtonText -BG $script:InfoDialogButtonBg }
-		Write-Buffer -Text "c" -FG $script:InfoDialogButtonHotkey -BG $script:InfoDialogButtonBg
-		Write-Buffer -Text "$($closingParen)lose" -FG $script:InfoDialogButtonText -BG $script:InfoDialogButtonBg
-			if ($script:DialogButtonShowBrackets) { Write-Buffer -Text "]" -FG $script:DialogButtonBracketFg -BG $script:DialogButtonBracketBg }
+			$null = Write-DialogButton -X ($dx + 2) -Y ($dy + 19) -Hotkey "c" -Suffix "lose" `
+				-Emoji $redX -EmojiColor $script:InfoDialogButtonText -TextColor $script:InfoDialogButtonText -BgColor $script:InfoDialogButtonBg -HotkeyColor $script:InfoDialogButtonHotkey
 			Write-Buffer -Text (" " * $bottomLinePadding) -BG $script:InfoDialogBg
 			Write-Buffer -Text $script:BoxVertical -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 
 			# — Line 20: blank ------------------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 20) -Text ($script:BoxVertical + (" " * $inner) + $script:BoxVertical) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
-
-			# — Line 21: bottom border ----------------------------------------
-			Write-Buffer -X $dx -Y ($dy + 21) -Text ($script:BoxBottomLeft + ($hLine * $inner) + $script:BoxBottomRight) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
+			Write-Buffer -X $dx -Y ($dy + 20) -Text ($_bv + (" " * $inner) + $_bv) -FG $script:InfoDialogBorder -BG $script:InfoDialogBg
 		}
 
 		# Initial draw
@@ -194,31 +176,26 @@
 			$pswindow     = $pshost.UI.RawUI
 			$newWindowSize = $pswindow.WindowSize
 			if ($newWindowSize.Width -ne $currentHostWidth -or $newWindowSize.Height -ne $currentHostHeight) {
-				$stableSize = Invoke-ResizeHandler -PreviousScreenState "dialog-info"
-				$HostWidthRef.Value  = $stableSize.Width
-				$HostHeightRef.Value = $stableSize.Height
-				$currentHostWidth    = $stableSize.Width
-				$currentHostHeight   = $stableSize.Height
-				Write-MainFrame -Force -NoFlush
-				$needsRedraw         = $true
-
+				$stableSize = Invoke-DialogResize -HostWidthRef $HostWidthRef -HostHeightRef $HostHeightRef `
+					-ScreenState "dialog-info"
+				$currentHostWidth  = $stableSize.Width
+				$currentHostHeight = $stableSize.Height
+				$needsRedraw = $true
 				$dialogX = [math]::Max(0, [math]::Floor(($currentHostWidth  - $dialogWidth)  / 2))
 				$dialogY = [math]::Max(0, [math]::Floor(($currentHostHeight - $dialogHeight) / 2))
-
 				& $drawInfoDialog $dialogX $dialogY
 				Write-DialogShadow -dialogX $dialogX -dialogY $dialogY -dialogWidth $dialogWidth -dialogHeight $dialogHeight -shadowColor $script:InfoDialogShadow
-			Flush-Buffer -ClearFirst
-
-			$buttonRowY        = $dialogY + 19
-			$closeButtonStartX = $dialogX + 2
-			$closeButtonEndX   = $closeButtonStartX + $dialogBracketWidth + $dialogIconWidth + 7 + $dialogParenOffset - 1
-			$script:DialogButtonBounds = @{
-				buttonRowY   = $buttonRowY
-				updateStartX = $closeButtonStartX
-				updateEndX   = $closeButtonEndX
-				cancelStartX = $closeButtonStartX
-				cancelEndX   = $closeButtonEndX
-			}
+				Flush-Buffer -ClearFirst
+				$buttonRowY        = $dialogY + 19
+				$closeButtonStartX = $dialogX + 2
+				$closeButtonEndX   = $closeButtonStartX + $dialogBracketWidth + $dialogIconWidth + 7 + $dialogParenOffset - 1
+				$script:DialogButtonBounds = @{
+					buttonRowY   = $buttonRowY
+					updateStartX = $closeButtonStartX
+					updateEndX   = $closeButtonEndX
+					cancelStartX = $closeButtonStartX
+					cancelEndX   = $closeButtonEndX
+				}
 			}
 
 			# Mouse click detection
